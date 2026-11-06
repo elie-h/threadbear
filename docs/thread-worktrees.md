@@ -23,6 +23,10 @@ export default {
     // Run in the worktree's root when the thread is archived or deleted,
     // before cleanup. Optional. Held to the same rules as setup.
     teardown: "./scripts/teardown.sh",
+    // "pr": tb land pushes the branch and opens a pull request instead
+    // of moving main (see "Landing as a PR"). Optional; "main" is the
+    // default.
+    land: "pr",
   },
   // actions, panels, hooks as before
 };
@@ -65,7 +69,8 @@ for a folder inside an opted-in repo:
    trusted; otherwise a note says the setup was skipped (docs/protocol.md,
    "Trusting a folder's patches").
 4. The record keeps `worktree: { repo, mainCheckout, path, branch, base }`
-   (`base` is main's commit when it was made); the summary carries
+   (`base` is main's commit when it was made; `land: "pr"` too, from the
+   patch); the summary carries
    `worktree?: { branch, mainCheckout }` so the app can show it.
 5. `threads.create` takes `worktree: false` to start in the folder as
    before.
@@ -73,7 +78,8 @@ for a folder inside an opted-in repo:
 The agent is told, in the appended system prompt: this thread has its own
 worktree of `<repo>` at `<path>` on branch `thread/<id8>`, made from main;
 commit there; other threads use other worktrees; when the work is done and
-checked, `tb land` puts it on main.
+checked, `tb land` puts it on main (or, with `land: "pr"`, pushes it and
+opens or updates its PR).
 
 ## Landing
 
@@ -94,12 +100,44 @@ chip, which is a command action every opted-in thread gets):
    `tb land` says so and which files, and leaves everything as it was.
 5. Prints what landed (`git log --oneline main@{1}..main`).
 
-It never pushes. The runner and the app follow the local main by
+It never pushes (unless the patch says `land: "pr"`, below). The runner and the app follow the local main by
 themselves.
 
 After landing, the branch stays and the thread can carry on: the next
 `tb land` lands only what's new. `tb land --dry-run` does steps 1 to 3 and
 says what would land.
+
+### Landing as a PR
+
+Elie, 2026-11-06: rawa's branches reach main through PRs squash-merged on
+GitHub. Fast-forwarding the local main to a thread's commits meant it
+forked from origin's main after every land (the squash is a new commit),
+and new threads started from a stale main. With `land: "pr"`, the local
+main only ever follows origin's, and `tb land`:
+
+1. Refuses with uncommitted changes, as above.
+2. Fetches origin's main and rebases the branch on `origin/main` (the
+   same undo-and-name-the-files on a conflict, the same merge for a
+   branch with a merge on it). A local main that's only behind origin's
+   is fast-forwarded; one that has forked is left, with a line saying so.
+   A failed fetch stops it.
+3. Runs `check`, as above.
+4. Pushes the branch to origin, with `--force-with-lease` against what
+   origin had for it a moment before, as a later land's rebase rewrites
+   it.
+5. Opens a PR with `gh pr create` (title from the first commit, body from
+   its message, or a list of the commits when there are several) unless
+   the branch has one open, which the push has just updated. Prints the
+   PR's URL.
+
+`--dry-run` does steps 1 to 3 and says what it would push. The Land chip
+is "Open PR" for such a thread (threads made before the patch said so
+keep "Land"; `tb land` reads the patch either way). Once the PR is
+squash-merged, the branch's own commits no longer match main's, so a
+thread carrying on afterwards should start again from `origin/main`
+rather than land more on the same branch. Cleaning up still counts a
+branch as landed only when it's on the local main, which a squash-merged
+one never is, so its worktree stays until it's removed by hand.
 
 ## Cleaning up
 

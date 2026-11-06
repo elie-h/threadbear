@@ -60,7 +60,7 @@ export const worktreesPart = {
     rec.updatedAt = this.isoNow();
     this.markDirty(st);
     this.log.info('made a worktree', { threadId: rec.id, path: made.worktree.path, branch: made.worktree.branch });
-    this.emit(st, { type: 'system.note', text: `Working in a worktree of its own at ${made.worktree.path}, on the branch ${made.worktree.branch}. tb land puts it on main.${made.note ? ` ${made.note}` : ''}` }, turnId);
+    this.emit(st, { type: 'system.note', text: `Working in a worktree of its own at ${made.worktree.path}, on the branch ${made.worktree.branch}. ${made.worktree.land === 'pr' ? 'tb land opens a pull request for it.' : 'tb land puts it on main.'}${made.note ? ` ${made.note}` : ''}` }, turnId);
     if (!patch.setup) return;
     const setup = await this.worktreeSetup(made.patchFile, patch.patch);
     if (rt.deleted) return;
@@ -174,11 +174,11 @@ export const worktreesPart = {
     const quoted = /^[\w./-]+$/.test(tb) ? tb : `'${tb.replace(/'/g, `'\\''`)}'`;
     return {
       id: 'worktree.land',
-      title: 'Land',
+      title: w.land === 'pr' ? 'Open PR' : 'Land',
       kind: 'command',
       command: `${quoted} land`,
       patch: 'worktree',
-      note: `Rebase ${w.branch} on main, run the check, then move main to it`,
+      note: w.land === 'pr' ? `Rebase ${w.branch} on origin's main, run the check, then push it and open or update its pull request` : `Rebase ${w.branch} on main, run the check, then move main to it`,
     };
   },
 

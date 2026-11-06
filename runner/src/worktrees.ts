@@ -5,7 +5,8 @@
 // one up. The runner (runner.ts) decides when, and says what happened in
 // the thread; tb (cli.ts) runs land.
 //
-// Everything here runs real git. Nothing ever pushes.
+// Everything here runs real git. Nothing pushes, except `tb land` in a
+// repo whose patch has `land: "pr"`, which pushes the thread's own branch.
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,6 +27,8 @@ export type WorktreeRecord = {
   // Set aside as a spare (with removedAt): the folder is still there, but
   // it's another thread's now, or will be.
   spare?: boolean;
+  // The patch's worktree.land: "pr" when tb land opens a pull request.
+  land?: 'pr';
 };
 
 export const MAIN = 'main';
@@ -160,7 +163,7 @@ async function makeWorktreeNow(opts: { cwd: string; threadId: string; patch: Wor
   if (!base) return { ok: false, reason: `couldn't read ${MAIN} in ${mainCheckout}` };
   const done = (where: string): MadeWorktree => ({
     ok: true,
-    worktree: { repo, mainCheckout, path: where, branch, base, ...(keep ? { keep } : {}) },
+    worktree: { repo, mainCheckout, path: where, branch, base, ...(keep ? { keep } : {}), ...(opts.patch.land ? { land: opts.patch.land } : {}) },
     cwd: sameSubfolder(opts.cwd, top, where),
     patchFile: path.join(where, path.relative(top, realpath(opts.patch.file))),
     ...(note ? { note } : {}),
@@ -228,9 +231,23 @@ const FETCH_MS = 20_000;
 async function catchUpWithOrigin(mainCheckout: string): Promise<string | undefined> {
   if (!(await git(mainCheckout, ['remote', 'get-url', 'origin'])).ok) return undefined;
   const asIs = `so this worktree starts from ${MAIN} as it is`;
-  const tracking = `refs/remotes/origin/${MAIN}`;
-  const fetched = await git(mainCheckout, ['fetch', '-q', '--no-tags', 'origin', `+refs/heads/${MAIN}:${tracking}`], FETCH_MS);
-  if (!fetched.ok) return `Couldn't fetch origin, ${asIs}: ${firstLine(fetched.stderr || 'timed out')}`;
+  const fetchFailed = await fetchOriginMain(mainCheckout);
+  if (fetchFailed) return `Couldn't fetch origin, ${asIs}: ${fetchFailed}`;
+  return fastForwardToOrigin(mainCheckout, asIs);
+}
+
+const ORIGIN_MAIN = `refs/remotes/origin/${MAIN}`;
+
+// Fetches origin's main into origin/main. Says why when it couldn't.
+async function fetchOriginMain(cwd: string): Promise<string | undefined> {
+  const fetched = await git(cwd, ['fetch', '-q', '--no-tags', 'origin', `+refs/heads/${MAIN}:${ORIGIN_MAIN}`], FETCH_MS);
+  return fetched.ok ? undefined : firstLine(fetched.stderr || 'timed out');
+}
+
+// Fast-forwards main in its checkout to the fetched origin/main when it's
+// only behind it. A note when it couldn't, ending with `asIs`.
+async function fastForwardToOrigin(mainCheckout: string, asIs: string): Promise<string | undefined> {
+  const tracking = ORIGIN_MAIN;
   const counts = await gitOut(mainCheckout, ['rev-list', '--left-right', '--count', `${MAIN}...${tracking}`]);
   const [ahead = 0, behind = 0] = (counts ?? '').split(/\s+/).map(Number);
   if (!behind) return undefined;
@@ -256,7 +273,9 @@ export function worktreeInstructions(w: WorktreeRecord): string {
   return [
     `This thread has its own git worktree of ${w.repo} at ${w.path}, on the branch ${w.branch}, made from ${MAIN}.`,
     `Commit your work there, on that branch. Other threads work in worktrees of their own, and the main checkout at ${w.mainCheckout} isn't yours to edit.`,
-    `When the work is done and checked, run \`tb land\` in the worktree: it rebases the branch on ${MAIN}, runs the repo's check and fast-forwards ${MAIN} to it. It never pushes. After landing you can carry on, and the next \`tb land\` lands only what's new.`,
+    w.land === 'pr'
+      ? `When the work is done and checked, run \`tb land\` in the worktree: it rebases the branch on origin's ${MAIN}, runs the repo's check, pushes the branch and opens or updates its pull request. Until the PR is merged, the next \`tb land\` updates it.`
+      : `When the work is done and checked, run \`tb land\` in the worktree: it rebases the branch on ${MAIN}, runs the repo's check and fast-forwards ${MAIN} to it. It never pushes. After landing you can carry on, and the next \`tb land\` lands only what's new.`,
   ].join(' ');
 }
 
@@ -267,6 +286,7 @@ export type LandTarget = {
   branch: string;
   mainCheckout: string;
   check?: string; // the patch's worktree.check
+  land?: 'pr'; // the patch's worktree.land
 };
 
 export type LandOptions = {
@@ -283,6 +303,12 @@ const CHECK_TAIL_LINES = 40;
 // `tb land`: refuses with uncommitted changes, rebases on main, runs the
 // check, fast-forwards main in its checkout and prints what landed.
 // Returns the exit code. Every refusal leaves main as it was.
+//
+// With `land: "pr"` (Elie, 6 Nov: rawa's PRs are squash-merged on GitHub,
+// so a local main moved to the branch forked from origin's after every
+// land): it rebases on origin's main instead, fetched first, and after the
+// check pushes the branch and opens or updates its PR (pushAsPr). Local
+// main only ever follows origin's, fast-forwarded when it's just behind.
 export async function land(t: LandTarget, opts: LandOptions = {}): Promise<number> {
   const out = opts.out ?? ((l: string) => process.stdout.write(l + '\n'));
   const err = opts.err ?? ((l: string) => process.stderr.write(l + '\n'));
@@ -290,12 +316,14 @@ export async function land(t: LandTarget, opts: LandOptions = {}): Promise<numbe
     err(lines.join('\n'));
     return 1;
   };
+  const pr = t.land === 'pr';
+  const untouched = pr ? 'nothing was pushed' : `${MAIN} wasn't touched`;
 
   const head = await gitOut(t.path, ['rev-parse', '--abbrev-ref', 'HEAD']);
   if (head === undefined) return fail(`${t.path} isn't a git checkout, so there's nothing to land.`);
   if (head !== t.branch) return fail(`The worktree at ${t.path} is on ${head}, not ${t.branch}. Check out ${t.branch} there, then run tb land again.`);
   const mainHead = await gitOut(t.mainCheckout, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (mainHead !== MAIN) {
+  if (!pr && mainHead !== MAIN) {
     return fail(`The main checkout at ${t.mainCheckout} is on ${mainHead ?? 'nothing git can read'}, not ${MAIN}, so tb land can't move ${MAIN} there.`);
   }
 
@@ -310,46 +338,60 @@ export async function land(t: LandTarget, opts: LandOptions = {}): Promise<numbe
     );
   }
 
+  // As a PR, the branch goes on origin's main, fetched now, and the local
+  // main catches up with it if it can.
+  let base = MAIN;
+  if (pr) {
+    if (!(await git(t.path, ['remote', 'get-url', 'origin'])).ok) return fail(`${t.path} has no origin to push to, so nothing was pushed.`);
+    const fetchFailed = await fetchOriginMain(t.path);
+    if (fetchFailed) return fail(`Couldn't fetch origin's ${MAIN}, so nothing was pushed: ${fetchFailed}`);
+    base = `origin/${MAIN}`;
+    if (mainHead === MAIN) {
+      const note = await fastForwardToOrigin(t.mainCheckout, `so it was left as it is`);
+      if (note) out(note);
+    }
+  }
+
   // 2. Rebase on main. A conflict is undone, and the files named. A branch
   // with a merge on it (Mike's release, brought in: docs/bringing-in-updates.md)
   // is never rebased, as that flattens the merge and rewrites his commits,
   // and then the copy never looks up to date with his release again. It
   // merges main in instead, when main has moved.
-  const hasMerge = Boolean(await gitOut(t.path, ['rev-list', '--merges', `${MAIN}..${t.branch}`]));
-  const behind = !(await git(t.path, ['merge-base', '--is-ancestor', MAIN, t.branch])).ok;
+  const hasMerge = Boolean(await gitOut(t.path, ['rev-list', '--merges', `${base}..${t.branch}`]));
+  const behind = !(await git(t.path, ['merge-base', '--is-ancestor', base, t.branch])).ok;
   if (hasMerge && behind) {
-    const merged = await git(t.path, ['merge', '--no-edit', MAIN]);
+    const merged = await git(t.path, ['merge', '--no-edit', base]);
     if (!merged.ok) {
       const conflicted = (await gitOut(t.path, ['diff', '--name-only', '--diff-filter=U'])) ?? '';
       await git(t.path, ['merge', '--abort']);
       if (conflicted) {
         return fail(
-          `Merging ${MAIN} into ${t.branch} (it has a merge on it, so it isn't rebased) ran into conflicts in:`,
+          `Merging ${base} into ${t.branch} (it has a merge on it, so it isn't rebased) ran into conflicts in:`,
           ...conflicted.split('\n').map((f) => `  ${f}`),
-          `The merge was undone, so ${t.branch} is as it was and ${MAIN} wasn't touched. Run git merge ${MAIN} in ${t.path}, sort out those files, commit, then run tb land again.`,
+          `The merge was undone, so ${t.branch} is as it was and ${untouched}. Run git merge ${base} in ${t.path}, sort out those files, commit, then run tb land again.`,
         );
       }
-      return fail(`git merge ${MAIN} failed in ${t.path}, so nothing landed: ${firstLine(merged.stderr || merged.stdout)}`);
+      return fail(`git merge ${base} failed in ${t.path}, so nothing landed: ${firstLine(merged.stderr || merged.stdout)}`);
     }
   } else if (!hasMerge) {
-    const rebase = await git(t.path, ['rebase', MAIN]);
+    const rebase = await git(t.path, ['rebase', base]);
     if (!rebase.ok) {
       const conflicted = (await gitOut(t.path, ['diff', '--name-only', '--diff-filter=U'])) ?? '';
       await git(t.path, ['rebase', '--abort']);
       if (conflicted) {
         return fail(
-          `Rebasing ${t.branch} on ${MAIN} ran into conflicts in:`,
+          `Rebasing ${t.branch} on ${base} ran into conflicts in:`,
           ...conflicted.split('\n').map((f) => `  ${f}`),
-          `The rebase was undone, so ${t.branch} is as it was and ${MAIN} wasn't touched. Run git rebase ${MAIN} in ${t.path}, sort out those files, finish the rebase, then run tb land again.`,
+          `The rebase was undone, so ${t.branch} is as it was and ${untouched}. Run git rebase ${base} in ${t.path}, sort out those files, finish the rebase, then run tb land again.`,
         );
       }
-      return fail(`git rebase ${MAIN} failed in ${t.path}, so nothing landed: ${firstLine(rebase.stderr || rebase.stdout)}`);
+      return fail(`git rebase ${base} failed in ${t.path}, so nothing landed: ${firstLine(rebase.stderr || rebase.stdout)}`);
     }
   }
 
-  const commits = (await gitOut(t.path, ['log', '--oneline', '--first-parent', `${MAIN}..${t.branch}`])) ?? '';
+  const commits = (await gitOut(t.path, ['log', '--oneline', '--first-parent', `${base}..${t.branch}`])) ?? '';
   if (!commits) {
-    out(`Nothing to land: ${t.branch} has no commits that aren't on ${MAIN}.`);
+    out(`Nothing to land: ${t.branch} has no commits that aren't on ${base}.`);
     return 0;
   }
 
@@ -360,7 +402,7 @@ export async function land(t: LandTarget, opts: LandOptions = {}): Promise<numbe
     if (!r.ok) {
       const tail = r.text.trimEnd().split('\n').slice(-CHECK_TAIL_LINES);
       return fail(
-        `The check failed${r.code !== undefined ? ` (exit ${r.code})` : ''}, so ${MAIN} wasn't touched. The last lines of its output:`,
+        `The check failed${r.code !== undefined ? ` (exit ${r.code})` : ''}, so ${untouched}. The last lines of its output:`,
         '',
         ...tail,
         '',
@@ -371,10 +413,12 @@ export async function land(t: LandTarget, opts: LandOptions = {}): Promise<numbe
   }
 
   if (opts.dryRun) {
-    out(`Would land on ${MAIN} in ${t.mainCheckout}:`);
+    out(pr ? `Would push ${t.branch} to origin and open or update its pull request:` : `Would land on ${MAIN} in ${t.mainCheckout}:`);
     out(commits);
     return 0;
   }
+
+  if (pr) return pushAsPr(t, base, out, fail);
 
   // 4. Fast-forward main where it's checked out.
   const before = await gitOut(t.mainCheckout, ['rev-parse', MAIN]);
@@ -398,6 +442,49 @@ export async function land(t: LandTarget, opts: LandOptions = {}): Promise<numbe
   out(`Landed on ${MAIN} in ${t.mainCheckout}:`);
   out(landed);
   return 0;
+}
+
+// How long a push, and each gh call, may take.
+const PUSH_MS = 5 * 60_000;
+const GH_MS = 60_000;
+
+// 4 and 5 of landing as a PR: push the branch (leased against what origin
+// has for it now, so a later land's rebase can replace it but someone
+// else's push to it is never overwritten), then open its PR unless one's
+// open already, which the push has just updated.
+async function pushAsPr(t: LandTarget, base: string, out: (l: string) => void, fail: (...lines: string[]) => number): Promise<number> {
+  const theirs = await git(t.path, ['ls-remote', 'origin', `refs/heads/${t.branch}`], FETCH_MS);
+  if (!theirs.ok) return fail(`Couldn't read ${t.branch} on origin, so nothing was pushed: ${firstLine(theirs.stderr || 'timed out')}`);
+  const lease = theirs.stdout.split(/\s/)[0] ?? '';
+  const push = await git(t.path, ['push', '-q', `--force-with-lease=refs/heads/${t.branch}:${lease}`, 'origin', `${t.branch}:refs/heads/${t.branch}`], PUSH_MS);
+  if (!push.ok) return fail(`git push of ${t.branch} to origin failed, so its pull request wasn't touched: ${firstLine(push.stderr || push.stdout || 'timed out')}`);
+
+  const open = await gh(t.path, ['pr', 'list', '--head', t.branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url']);
+  if (!open.ok) return fail(`Pushed ${t.branch} to origin, but gh couldn't look for its pull request: ${open.text}`);
+  if (open.text) {
+    out(`Updated the pull request: ${open.text}`);
+    return 0;
+  }
+  // The title is the first commit's subject; the body is its message's
+  // body when it's the only one, else a list of them all.
+  const subjects = ((await gitOut(t.path, ['log', '--reverse', '--first-parent', '--format=%s', `${base}..${t.branch}`])) ?? '').split('\n');
+  const body = subjects.length === 1 ? ((await gitOut(t.path, ['log', '-1', '--format=%b', t.branch])) ?? '') : subjects.map((s) => `- ${s}`).join('\n');
+  const made = await gh(t.path, ['pr', 'create', '--base', MAIN, '--head', t.branch, '--title', subjects[0], '--body', body]);
+  if (!made.ok) return fail(`Pushed ${t.branch} to origin, but gh couldn't open its pull request: ${made.text}`);
+  out(`Opened a pull request: ${made.text.split('\n').filter(Boolean).at(-1) ?? made.text}`);
+  return 0;
+}
+
+// gh in `cwd`, never prompting. `text` is its output, or why it failed.
+function gh(cwd: string, args: string[]): Promise<{ ok: boolean; text: string }> {
+  const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: '1', GIT_TERMINAL_PROMPT: '0' };
+  return new Promise((resolve) => {
+    execFile('gh', args, { cwd, env, timeout: GH_MS, maxBuffer: 4 * 1024 * 1024 }, (e, stdout, stderr) => {
+      if (!e) return resolve({ ok: true, text: String(stdout).trim() });
+      const missing = (e as NodeJS.ErrnoException).code === 'ENOENT';
+      resolve({ ok: false, text: missing ? "gh isn't installed, or isn't on PATH." : firstLine(String(stderr) || String(stdout) || e.message) });
+    });
+  });
 }
 
 // The files git names when a merge would overwrite local changes (or

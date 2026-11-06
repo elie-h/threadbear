@@ -99,6 +99,8 @@ test('a patch can carry worktree with setup and check; anything malformed is the
   assert.deepEqual(readPatchModule('w', 'project', '/x/w.ts', { worktree: {} }).worktree, {});
   assert.deepEqual(readPatchModule('k', 'project', '/x/k.ts', { worktree: { keep: ['app/.build', 'dock/.build'] } }).worktree, { keep: ['app/.build', 'dock/.build'] });
   assert.deepEqual(readPatchModule('t', 'project', '/x/t.ts', { worktree: { teardown: './scripts/teardown.sh' } }).worktree, { teardown: './scripts/teardown.sh' });
+  assert.deepEqual(readPatchModule('p', 'project', '/x/p.ts', { worktree: { land: 'pr' } }).worktree, { land: 'pr' });
+  assert.deepEqual(readPatchModule('m', 'project', '/x/m.ts', { worktree: { land: 'main' } }).worktree, {}, 'main is the default');
   assert.equal(readPatchModule('a', 'project', '/x/a.ts', { actions: [] }).worktree, undefined, 'none unless asked for');
   for (const [worktree, error] of [
     [[], 'worktree should be an object with setup and/or check.'],
@@ -110,6 +112,7 @@ test('a patch can carry worktree with setup and check; anything malformed is the
     [{ keep: [] }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
     [{ keep: ['/abs/.build'] }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
     [{ keep: ['../up'] }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
+    [{ land: 'github' }, 'worktree.land should be "main" (move main to the branch) or "pr" (push it and open a pull request).'],
   ] as const) {
     const bad = readPatchModule('b', 'project', '/x/b.ts', { worktree });
     assert.equal(bad.info.error, error);
@@ -181,6 +184,21 @@ test('a new thread in an opted-in repo gets its own worktree, cwd, setup run, br
   const rec = h.store.load(thread.id);
   assert.deepEqual(rec?.worktree, { repo: 'proj', mainCheckout: main, path: wt, branch: `thread/${id8}`, base: sh(main, 'git rev-parse main') });
   assert.equal(rec?.worktreePending, undefined);
+});
+
+test('a new thread in a repo that lands as a PR is told so, and its chip says Open PR', async () => {
+  const { main } = makeRepo(PATCH(`{ land: "pr" }`));
+  const h = harness();
+  const { thread } = h.runner.create({ text: 'Fix it', accountId: 'claude-3', cwd: main });
+  await until(() => h.adapter.sessions.length === 1, 'the CLI to start');
+  const brief = h.adapter.last.opts.instructions ?? '';
+  assert.match(brief, /run `tb land` in the worktree: it rebases the branch on origin's main, runs the repo's check, pushes the branch and opens or updates its pull request\./);
+  assert.doesNotMatch(brief, /never pushes/);
+  assert.equal(h.store.load(thread.id)?.worktree?.land, 'pr');
+  await until(() => Boolean(h.runner.get(thread.id).actions), 'the patches to load');
+  const chip = h.runner.get(thread.id).actions?.find((a) => a.id === 'worktree.land');
+  assert.equal(chip?.title, 'Open PR');
+  assert.match(chip?.note ?? '', /push it and open or update its pull request/);
 });
 
 test('worktree: false, a folder with no patches, and a repo without main checked out all start where asked', async () => {
@@ -561,6 +579,153 @@ test('land --dry-run does the checks and says what would land, without moving ma
   assert.equal(c.out.at(-2), `Would land on main in ${main}:`);
   assert.match(c.out.at(-1)!, /Add b$/);
   assert.equal(sh(main, 'git rev-parse main'), before);
+});
+
+// ------------------------------------------------------- landing as a PR
+
+// A repo with a bare origin (main pushed to it), and a fake gh on PATH
+// that logs its arguments and answers `pr list` from a file.
+function makePrRepo(): { root: string; main: string; origin: string; ghLog: string; openPr: string; restore: () => void } {
+  const { root, main } = makeRepo(PATCH(`{ land: "pr" }`));
+  const origin = path.join(root, 'origin.git');
+  sh(root, `git init -q --bare -b main ${origin}`);
+  sh(main, `git remote add origin ${origin} && git push -q origin main`);
+  const bin = path.join(root, 'bin');
+  const ghLog = path.join(root, 'gh.log');
+  const openPr = path.join(root, 'open-pr');
+  write(bin, {
+    gh: `#!/bin/sh\nprintf '%s\\n---\\n' "$*" >> ${ghLog}\ncase "$1 $2" in\n  "pr list") cat ${openPr} 2>/dev/null; exit 0 ;;\n  "pr create") echo https://github.com/o/r/pull/7 ;;\nesac\n`,
+  });
+  fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath}`;
+  return { root, main, origin, ghLog, openPr, restore: () => (process.env.PATH = oldPath) };
+}
+
+// Someone else's work merged on GitHub: a commit on origin's main only.
+function pushToOrigin(root: string, origin: string, files: Record<string, string>, message: string): void {
+  const other = path.join(root, `other-${Math.random().toString(36).slice(2)}`);
+  sh(root, `git clone -q ${origin} ${other}`);
+  commit(other, files, message);
+  sh(other, 'git push -q origin main');
+}
+
+test('land as a PR: rebases on origin/main, runs the check, pushes the branch and opens a PR; local main only catches up', async () => {
+  const r = makePrRepo();
+  try {
+    const t = makeBranch(r.main);
+    commit(t.path, { 'runner/b.ts': 'export const b = 2;\n' }, 'Add b');
+    pushToOrigin(r.root, r.origin, { 'merged.txt': 'from GitHub\n' }, 'Merged on GitHub');
+    const c = capture();
+    const code = await land({ ...t, land: 'pr', check: 'test -f merged.txt && echo checked' }, c.opts);
+    assert.equal(code, 0, c.err.join('\n'));
+    assert.equal(sh(t.path, 'git log -1 --format=%s HEAD~1'), 'Merged on GitHub', 'rebased on origin/main');
+    assert.equal(sh(r.origin, `git rev-parse ${t.branch}`), sh(t.path, 'git rev-parse HEAD'), 'the branch is on origin');
+    assert.equal(sh(r.main, 'git rev-parse main'), sh(r.origin, 'git rev-parse main'), 'local main caught up with origin, no further');
+    const gh = fs.readFileSync(r.ghLog, 'utf8');
+    assert.match(gh, new RegExp(`pr list --head ${t.branch} --state open`));
+    assert.match(gh, new RegExp(`pr create --base main --head ${t.branch} --title Add b --body`));
+    assert.equal(c.out.at(-1), 'Opened a pull request: https://github.com/o/r/pull/7');
+
+    // A later land rebases again, force-pushes, and updates the open PR.
+    fs.writeFileSync(r.openPr, 'https://github.com/o/r/pull/7\n');
+    fs.writeFileSync(r.ghLog, '');
+    pushToOrigin(r.root, r.origin, { 'more.txt': 'x\n' }, 'More on GitHub');
+    commit(t.path, { 'runner/c.ts': '3\n' }, 'Add c');
+    const again = capture();
+    assert.equal(await land({ ...t, land: 'pr' }, again.opts), 0, again.err.join('\n'));
+    assert.equal(sh(r.origin, `git rev-parse ${t.branch}`), sh(t.path, 'git rev-parse HEAD'));
+    assert.doesNotMatch(fs.readFileSync(r.ghLog, 'utf8'), /pr create/);
+    assert.equal(again.out.at(-1), 'Updated the pull request: https://github.com/o/r/pull/7');
+    assert.equal(sh(r.main, 'git log -1 --format=%s main'), 'More on GitHub');
+  } finally {
+    r.restore();
+  }
+});
+
+test('land as a PR: several commits make the title from the first and list them all in the body', async () => {
+  const r = makePrRepo();
+  try {
+    const t = makeBranch(r.main);
+    commit(t.path, { 'b.txt': '1\n' }, 'Add b');
+    commit(t.path, { 'c.txt': '1\n' }, 'Add c');
+    const c = capture();
+    assert.equal(await land({ ...t, land: 'pr' }, c.opts), 0, c.err.join('\n'));
+    const gh = fs.readFileSync(r.ghLog, 'utf8');
+    assert.match(gh, /--title Add b --body - Add b\n- Add c\n/);
+  } finally {
+    r.restore();
+  }
+});
+
+test('land as a PR leaves a local main that has forked from origin, and says so', async () => {
+  const r = makePrRepo();
+  try {
+    const t = makeBranch(r.main);
+    commit(t.path, { 'b.txt': '1\n' }, 'Add b');
+    commit(r.main, { 'local.txt': '1\n' }, 'Only local');
+    pushToOrigin(r.root, r.origin, { 'gh.txt': '1\n' }, 'Merged on GitHub');
+    const mainBefore = sh(r.main, 'git rev-parse main');
+    const c = capture();
+    assert.equal(await land({ ...t, land: 'pr' }, c.opts), 0, c.err.join('\n'));
+    assert.equal(sh(r.main, 'git rev-parse main'), mainBefore);
+    assert.ok(c.out.some((l) => /main has 1 commit that isn't on origin\/main and is 1 behind it/.test(l)), c.out.join('\n'));
+    assert.ok(!fs.existsSync(path.join(t.path, 'local.txt')), 'based on origin/main, not local main');
+  } finally {
+    r.restore();
+  }
+});
+
+test('land as a PR --dry-run checks and says what it would push, pushing nothing', async () => {
+  const r = makePrRepo();
+  try {
+    const t = makeBranch(r.main);
+    commit(t.path, { 'b.txt': '1\n' }, 'Add b');
+    const c = capture();
+    assert.equal(await land({ ...t, land: 'pr', check: 'true' }, { ...c.opts, dryRun: true }), 0, c.err.join('\n'));
+    assert.equal(c.out.at(-2), `Would push ${t.branch} to origin and open or update its pull request:`);
+    assert.match(c.out.at(-1)!, /Add b$/);
+    assert.throws(() => sh(r.origin, `git rev-parse --verify ${t.branch}`));
+    assert.ok(!fs.existsSync(r.ghLog), 'gh never ran');
+  } finally {
+    r.restore();
+  }
+});
+
+test('land as a PR refuses with uncommitted changes, and when origin can\'t be fetched', async () => {
+  const r = makePrRepo();
+  try {
+    const t = makeBranch(r.main);
+    commit(t.path, { 'b.txt': '1\n' }, 'Add b');
+    write(t.path, { 'README.md': 'changed\n' });
+    const c = capture();
+    assert.equal(await land({ ...t, land: 'pr' }, c.opts), 1);
+    assert.match(c.err.join('\n'), /^There are uncommitted changes/);
+    sh(t.path, 'git checkout -q README.md');
+    fs.rmSync(r.origin, { recursive: true });
+    const gone = capture();
+    assert.equal(await land({ ...t, land: 'pr' }, gone.opts), 1);
+    assert.match(gone.err.join('\n'), /^Couldn't fetch origin's main, so nothing was pushed:/);
+  } finally {
+    r.restore();
+  }
+});
+
+test('land as a PR: a conflict with origin/main is undone and names the files', async () => {
+  const r = makePrRepo();
+  try {
+    const t = makeBranch(r.main);
+    commit(t.path, { 'README.md': 'one\nTWO from the thread\nthree\n' }, 'Thread edit');
+    pushToOrigin(r.root, r.origin, { 'README.md': 'one\nTWO on GitHub\nthree\n' }, 'GitHub edit');
+    const before = sh(t.path, 'git rev-parse HEAD');
+    const c = capture();
+    assert.equal(await land({ ...t, land: 'pr' }, c.opts), 1);
+    assert.match(c.err.join('\n'), /^Rebasing thread\/abcd1234 on origin\/main ran into conflicts in:\n  README.md\n/);
+    assert.equal(sh(t.path, 'git rev-parse HEAD'), before);
+    assert.throws(() => sh(r.origin, `git rev-parse --verify ${t.branch}`));
+  } finally {
+    r.restore();
+  }
 });
 
 test('overwrittenFiles reads both of git\'s refusals', () => {

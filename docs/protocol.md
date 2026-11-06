@@ -2890,7 +2890,7 @@ trust's store and rules.
 |---|---|---|
 | `convex` | a folder with `convex/` and a `package.json` or `convex.json` beside it (a bare folder called `convex` isn't enough) | `convex.dashboard`, a `url` panel: `https://dashboard.convex.dev/d/<name>` for the `CONVEX_DEPLOYMENT` in `.env.local` (then `.env`), `http://127.0.0.1:6790` for an anonymous local deployment, the dashboard's front page with no deployment yet. A cloud deployment's panel also has `convex`, with the deployment's URL from the `.env.local` (then `.env`) line ending `CONVEX_URL` (`CONVEX_URL`, `VITE_CONVEX_URL`, ...). Only those lines of the file are read |
 | `xcode` | a folder with an `.xcodeproj` or `.xcworkspace` | `xcode.simulator`, an `image` panel drawn by `panels.render` |
-| `worktree` | a thread with a worktree of its own (see Worktrees) | no panel: the action `worktree.land`, "Land", which runs `tb land` |
+| `worktree` | a thread with a worktree of its own (see Worktrees) | no panel: the action `worktree.land`, "Land" ("Open PR" with `land: "pr"`), which runs `tb land` |
 
 A client shows what it can: a `url` panel in a web view, an `image` panel
 by asking `panels.render` now and then while it's on screen, a `list`
@@ -3014,6 +3014,7 @@ export default {
     setup: "./scripts/setup.sh",    // run in the new worktree before the first turn; optional
                                     // (one script and plain words: see "Trusting a folder's patches")
     check: "./check.sh --quick",    // run by `tb land` before main moves; optional
+    land: "pr",                     // tb land pushes and opens a PR instead; optional, "main" by default
   },
 }
 ```
@@ -3022,7 +3023,8 @@ The first patch in the thread's own folder chain with a `worktree` wins;
 `~/.threadbear/patches/` and project folders never count. The repo is the
 git toplevel of the folder holding `.threadbear/`, and its main checkout
 is the one with `main` checked out. A malformed `worktree` (not an object,
-or a `setup` or `check` that isn't a command) is the file's `error`.
+a `setup` or `check` that isn't a command, or a `land` other than
+`"main"` or `"pr"`) is the file's `error`.
 
 A new thread in such a repo (from `threads.create`, `create_thread` or a
 schedule, unless `worktree: false`) gets, before its first turn starts:
@@ -3044,6 +3046,14 @@ main (a conflict aborts and names the files), runs `check`, then
 `git merge --ff-only` in the main checkout (refused, and nothing changed,
 if main's own uncommitted changes are in the way) and prints what landed.
 It never pushes. `--dry-run` stops before main moves.
+
+With `land: "pr"` (a repo whose PRs are squash-merged on GitHub), `tb
+land` instead fetches origin's main and rebases on `origin/main`,
+fast-forwarding the local main to it only when it's just behind, runs
+`check`, pushes the branch (`--force-with-lease`) and opens a PR with `gh
+pr create` unless it has one open, then prints the PR's URL. `--dry-run`
+stops before the push. The thread's `worktree.land` action is titled
+"Open PR" rather than "Land", and the agent's brief says it opens a PR.
 
 When the thread is archived or deleted, a worktree whose branch is on main
 (or has nothing of its own) is removed with its branch; otherwise both stay,

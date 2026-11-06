@@ -129,8 +129,9 @@ const HELP = `tb: talk to the Threadbear runner
                                   one call by hand: classify (--labels), extract (--field),
                                   summarize or generate. It spends like any other
   tb land [--dry-run]             in a thread's own worktree: rebase its branch on main, run
-                                  the repo's check, then move main to it (never pushes);
-                                  --dry-run stops before main moves
+                                  the repo's check, then move main to it (never pushes; with
+                                  the patch's land: "pr", push it and open or update its PR);
+                                  --dry-run stops before anything moves
   tb pair                         what to copy to another Mac (this runner's token file and
                                   host) so its app can open this Mac's threads
   tb runner add <name> (--ssh <host> | --out <file>) [--id <runnerId>]
@@ -292,7 +293,8 @@ type Flags = Record<string, string | boolean | string[] | undefined>;
 // (THREADBEAR_THREAD_ID) the runner says where the thread's worktree is;
 // otherwise, or when the thread has none, it's the git checkout this runs
 // in, if that's on a thread/ branch. The check is the one in that
-// worktree's own patch, so a branch that changes it lands under its own.
+// worktree's own patch, so a branch that changes it lands under its own,
+// and so is its `land` ("pr": push it and open a pull request).
 async function landCommand(cfg: ReturnType<typeof loadConfig>, dryRun: boolean): Promise<number> {
   const here = process.cwd();
   let target: Omit<LandTarget, 'check'> | undefined;
@@ -313,15 +315,15 @@ async function landCommand(cfg: ReturnType<typeof loadConfig>, dryRun: boolean):
     }
     target = found.target;
   }
-  let check: string | undefined;
+  let patch: Awaited<ReturnType<typeof findWorktreePatch>>;
   try {
     // Trusted as it stands: running tb land is asking for this check.
-    check = (await findWorktreePatch(from, undefined, undefined, undefined, TRUST_ALL))?.check;
+    patch = await findWorktreePatch(from, undefined, undefined, undefined, TRUST_ALL);
   } catch (e) {
     console.error(`Couldn't read the repo's patches for its check: ${(e as Error).message}`);
     return 1;
   }
-  return land({ path: target.path, branch: target.branch, mainCheckout: target.mainCheckout, check }, { dryRun });
+  return land({ path: target.path, branch: target.branch, mainCheckout: target.mainCheckout, check: patch?.check, land: patch?.land }, { dryRun });
 }
 
 // The thread's summary, or undefined when the runner can't be reached or
