@@ -43,7 +43,13 @@ using. Action buttons you press run as normal.
 `threads.create` (and `create_thread`, and schedules that start a thread)
 for a folder inside an opted-in repo:
 
-1. Makes `git worktree add -b thread/<id8> <parent>/<repo>-threads/<id8>
+1. Brings main up to origin's first, when the main checkout has an
+   `origin`: `git fetch origin main`, then a fast-forward of main if it's
+   only behind (Elie, 2026-11-06: PRs merged on GitHub never reached the
+   local main, so threads started 111 commits behind). If main has forked
+   from origin's, or the fetch fails (20 s at most), main is left as it
+   is and the thread's "Working in a worktree" note says why.
+   Then makes `git worktree add -b thread/<id8> <parent>/<repo>-threads/<id8>
    main` from the main checkout, where `<id8>` is the first 8 characters of
    the thread id. A leftover folder or branch of that name is an error
    shown in the thread, and the thread starts in the main checkout as

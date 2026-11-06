@@ -38,11 +38,11 @@ type GitResult = { ok: boolean; code: number; stdout: string; stderr: string };
 
 // git in `cwd`. Variables that point git at some other repo (set when this
 // runs from inside a git hook) are dropped, so -C always wins.
-export function git(cwd: string, args: string[]): Promise<GitResult> {
+export function git(cwd: string, args: string[], timeoutMs?: number): Promise<GitResult> {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
   for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_PREFIX']) delete env[k];
   return new Promise((resolve) => {
-    execFile('git', ['-C', cwd, ...args], { env, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile('git', ['-C', cwd, ...args], { env, maxBuffer: 16 * 1024 * 1024, timeout: timeoutMs }, (err, stdout, stderr) => {
       const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : 1) : 0;
       resolve({ ok: !err, code, stdout: String(stdout), stderr: String(stderr) });
     });
@@ -115,7 +115,8 @@ export function sameSubfolder(cwd: string, from: string, to: string): string {
 // --------------------------------------------------------------- making
 
 // `patchFile`: the worktree's own copy of the patch that asked for it.
-export type MadeWorktree = { ok: true; worktree: WorktreeRecord; cwd: string; patchFile: string } | { ok: false; reason: string };
+// `note`: why it starts from a main that may be behind origin's.
+export type MadeWorktree = { ok: true; worktree: WorktreeRecord; cwd: string; patchFile: string; note?: string } | { ok: false; reason: string };
 
 // Makes the thread's worktree from main in the main checkout. A leftover
 // branch of the thread's name is a reason, never overwritten.
@@ -154,6 +155,7 @@ async function makeWorktreeNow(opts: { cwd: string; threadId: string; patch: Wor
   if ((await git(mainCheckout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).ok) {
     return { ok: false, reason: `the branch ${branch} already exists` };
   }
+  const note = await catchUpWithOrigin(mainCheckout);
   const base = await gitOut(mainCheckout, ['rev-parse', MAIN]);
   if (!base) return { ok: false, reason: `couldn't read ${MAIN} in ${mainCheckout}` };
   const done = (where: string): MadeWorktree => ({
@@ -161,6 +163,7 @@ async function makeWorktreeNow(opts: { cwd: string; threadId: string; patch: Wor
     worktree: { repo, mainCheckout, path: where, branch, base, ...(keep ? { keep } : {}) },
     cwd: sameSubfolder(opts.cwd, top, where),
     patchFile: path.join(where, path.relative(top, realpath(opts.patch.file))),
+    ...(note ? { note } : {}),
   });
 
   if (keep) {
@@ -215,6 +218,31 @@ async function spares(mainCheckout: string, threads: string): Promise<string[]> 
 // A claimed spare, made like new on `branch` at `base`. The kept folders
 // are left as they are; everything else git doesn't track goes, ignored
 // files too (an old thread's node_modules, say), and setup runs again.
+const FETCH_MS = 20_000;
+
+// Elie, 2026-11-06: a repo whose branches land through PRs merged on
+// GitHub never gets them on its local main, so threads started from a
+// main 111 commits behind. A main that's only behind origin's is
+// fast-forwarded; one that has forked from it is left, and the note says
+// so. With no origin there's nothing to catch up with.
+async function catchUpWithOrigin(mainCheckout: string): Promise<string | undefined> {
+  if (!(await git(mainCheckout, ['remote', 'get-url', 'origin'])).ok) return undefined;
+  const asIs = `so this worktree starts from ${MAIN} as it is`;
+  const tracking = `refs/remotes/origin/${MAIN}`;
+  const fetched = await git(mainCheckout, ['fetch', '-q', '--no-tags', 'origin', `+refs/heads/${MAIN}:${tracking}`], FETCH_MS);
+  if (!fetched.ok) return `Couldn't fetch origin, ${asIs}: ${firstLine(fetched.stderr || 'timed out')}`;
+  const counts = await gitOut(mainCheckout, ['rev-list', '--left-right', '--count', `${MAIN}...${tracking}`]);
+  const [ahead = 0, behind = 0] = (counts ?? '').split(/\s+/).map(Number);
+  if (!behind) return undefined;
+  if (ahead) {
+    const own = ahead === 1 ? "1 commit that isn't" : `${ahead} commits that aren't`;
+    return `${MAIN} has ${own} on origin/${MAIN} and is ${behind} behind it, ${asIs}.`;
+  }
+  const ff = await git(mainCheckout, ['merge', '--ff-only', '-q', tracking]);
+  if (!ff.ok) return `Couldn't fast-forward ${MAIN} to origin/${MAIN} in ${mainCheckout}, ${asIs}: ${firstLine(ff.stderr || ff.stdout)}`;
+  return undefined;
+}
+
 async function reuse(where: string, branch: string, base: string, keep: string[]): Promise<boolean> {
   const exclude = keep.flatMap((k) => ['-e', `/${k.replace(/^\/+|\/+$/g, '')}`]);
   for (const args of [['reset', '-q', '--hard'], ['clean', '-ffdxq', ...exclude], ['checkout', '-q', '-b', branch, base]]) {

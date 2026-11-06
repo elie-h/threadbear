@@ -224,6 +224,43 @@ test('a leftover folder or branch of the same name is never reused', async () =>
   assert.deepEqual(r, { ok: false, reason: `the w patch asks for one, but ${notRepo} isn't in a git repo` });
 });
 
+// Elie, 6 Nov: rawa's PRs merge on GitHub, so local main fell 111 commits
+// behind and every new thread started from it.
+test("a new worktree starts from origin's main: main is fast-forwarded when it's only behind, and a fork from it is said", async () => {
+  const { root, main } = makeRepo();
+  const patch = (await findWorktreePatch(main, root))!;
+  const origin = path.join(root, 'origin.git');
+  sh(root, `git clone -q --bare ${main} ${origin}`);
+  sh(main, `git remote add origin ${origin}`);
+  const other = path.join(root, 'other');
+  sh(root, `git clone -q ${origin} ${other}`);
+  commit(other, { 'merged.txt': 'merged on GitHub\n' }, 'merged on GitHub');
+  sh(other, 'git push -q origin main');
+  const pushed = sh(other, 'git rev-parse HEAD');
+
+  const behind = await makeWorktree({ cwd: main, threadId: 'aaaaaaaa-0000', patch });
+  assert.ok(behind.ok);
+  assert.equal(behind.worktree.base, pushed);
+  assert.equal(sh(main, 'git rev-parse main'), pushed);
+  assert.equal(fs.readFileSync(path.join(main, 'merged.txt'), 'utf8'), 'merged on GitHub\n');
+  assert.equal(behind.note, undefined);
+
+  commit(main, { 'landed.txt': 'landed here\n' }, 'landed here');
+  commit(other, { 'more.txt': 'more\n' }, 'more on GitHub');
+  sh(other, 'git push -q origin main');
+  const local = sh(main, 'git rev-parse main');
+  const forked = await makeWorktree({ cwd: main, threadId: 'bbbbbbbb-0000', patch });
+  assert.ok(forked.ok);
+  assert.equal(forked.worktree.base, local);
+  assert.equal(forked.note, "main has 1 commit that isn't on origin/main and is 1 behind it, so this worktree starts from main as it is.");
+
+  fs.rmSync(origin, { recursive: true });
+  const offline = await makeWorktree({ cwd: main, threadId: 'cccccccc-0000', patch });
+  assert.ok(offline.ok);
+  assert.equal(offline.worktree.base, local);
+  assert.match(offline.note ?? '', /^Couldn't fetch origin, so this worktree starts from main as it is: /);
+});
+
 test('a failing setup is shown and the turn starts anyway', async () => {
   const { main } = makeRepo(PATCH(`{ setup: "echo no luck >&2; exit 4" }`));
   const h = harness();

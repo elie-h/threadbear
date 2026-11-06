@@ -3026,6 +3026,9 @@ or a `setup` or `check` that isn't a command) is the file's `error`.
 
 A new thread in such a repo (from `threads.create`, `create_thread` or a
 schedule, unless `worktree: false`) gets, before its first turn starts:
+main fast-forwarded to `origin/main` when it's only behind it (fetched
+first, when the main checkout has an `origin`; a fork or a failed fetch
+leaves main as it is, and the worktree's `system.note` says why),
 `git worktree add -b thread/<id8> <parent>/<repo>-threads/<id8> main` from
 the main checkout (`<id8>` is the thread id's first 8 characters), a `cwd`
 in the same subfolder of it, `setup` run in its root (an `action.run` with

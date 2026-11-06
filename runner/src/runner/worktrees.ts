@@ -60,7 +60,7 @@ export const worktreesPart = {
     rec.updatedAt = this.isoNow();
     this.markDirty(st);
     this.log.info('made a worktree', { threadId: rec.id, path: made.worktree.path, branch: made.worktree.branch });
-    this.emit(st, { type: 'system.note', text: `Working in a worktree of its own at ${made.worktree.path}, on the branch ${made.worktree.branch}. tb land puts it on main.` }, turnId);
+    this.emit(st, { type: 'system.note', text: `Working in a worktree of its own at ${made.worktree.path}, on the branch ${made.worktree.branch}. tb land puts it on main.${made.note ? ` ${made.note}` : ''}` }, turnId);
     if (!patch.setup) return;
     const setup = await this.worktreeSetup(made.patchFile, patch.patch);
     if (rt.deleted) return;
