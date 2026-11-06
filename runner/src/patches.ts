@@ -89,7 +89,7 @@ type LoadedPatch = { info: PatchInfo; panels: Panel[]; actions: Action[]; hooks:
 // thread rather than removed (worktrees.ts, "spares").
 // `setupRun` is `setup` as it runs, for a patch trusted by its hash
 // (bindAutomatic); absent, `setup` runs as written.
-export type WorktreeConfig = { setup?: string; check?: string; keep?: string[]; setupRun?: string };
+export type WorktreeConfig = { setup?: string; check?: string; teardown?: string; keep?: string[]; setupRun?: string; teardownRun?: string };
 
 // A folder of one of the thread's projects.
 export type ProjectFolder = { folder: string; projectId: string };
@@ -460,6 +460,11 @@ function bindAutomatic(loaded: LoadedPatch, file: string, files: string[], block
     if ('problem' in bound) return refuse('worktree setup', bound.problem);
     worktree = { ...worktree, setupRun: note(bound.run) };
   }
+  if (worktree?.teardown) {
+    const bound = automaticCommand(worktree.teardown, folder, files, blocked);
+    if ('problem' in bound) return refuse('worktree teardown', bound.problem);
+    worktree = { ...worktree, teardownRun: note(bound.run) };
+  }
   return { ...loaded, actions, hooks, ...(worktree ? { worktree } : {}) };
 }
 
@@ -504,10 +509,10 @@ export function readPatchModule(id: string, source: 'home' | 'project', file: st
   };
   let worktree: WorktreeConfig | undefined;
   if (v.worktree !== undefined) {
-    const w = v.worktree as { setup?: unknown; check?: unknown; keep?: unknown };
+    const w = v.worktree as { setup?: unknown; check?: unknown; teardown?: unknown; keep?: unknown };
     if (!w || typeof w !== 'object' || Array.isArray(w)) return problem('worktree should be an object with setup and/or check.');
     worktree = {};
-    for (const key of ['setup', 'check'] as const) {
+    for (const key of ['setup', 'check', 'teardown'] as const) {
       if (w[key] === undefined) continue;
       if (typeof w[key] !== 'string' || !w[key].trim()) return problem(`worktree.${key} should be a command.`);
       worktree[key] = w[key];

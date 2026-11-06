@@ -20,6 +20,9 @@ export default {
     setup: "./scripts/setup.sh",
     // Run by `tb land` before main moves. Optional; a failure stops it.
     check: "./check.sh --quick",
+    // Run in the worktree's root when the thread is archived or deleted,
+    // before cleanup. Optional. Held to the same rules as setup.
+    teardown: "./scripts/teardown.sh",
   },
   // actions, panels, hooks as before
 };
@@ -93,6 +96,16 @@ After landing, the branch stays and the thread can carry on: the next
 says what would land.
 
 ## Cleaning up
+
+Elie, 2026-11-06: a repo whose setup makes something outside the folder
+(a Convex deployment per worktree, say) needs it gone when the thread is
+done, and its branches land through squashed PRs, so git never sees them
+as merged. So when a thread with a worktree is archived or deleted, the
+patch's `teardown` runs first, in the worktree's root, whether or not the
+branch landed. It's the worktree's own copy that's read and trusted, as
+for `setup`. Its output goes in the transcript as an `action.run` event
+(`trigger: "worktree.teardown"`); a deleted thread gets a notice only if
+it fails. It runs on each archive, so it should be safe to run twice.
 
 When a thread with a worktree is archived or deleted: if its branch is
 merged into main (or has no commits of its own), the worktree is removed

@@ -98,12 +98,14 @@ test('a patch can carry worktree with setup and check; anything malformed is the
   assert.deepEqual(ok.actions, []);
   assert.deepEqual(readPatchModule('w', 'project', '/x/w.ts', { worktree: {} }).worktree, {});
   assert.deepEqual(readPatchModule('k', 'project', '/x/k.ts', { worktree: { keep: ['app/.build', 'dock/.build'] } }).worktree, { keep: ['app/.build', 'dock/.build'] });
+  assert.deepEqual(readPatchModule('t', 'project', '/x/t.ts', { worktree: { teardown: './scripts/teardown.sh' } }).worktree, { teardown: './scripts/teardown.sh' });
   assert.equal(readPatchModule('a', 'project', '/x/a.ts', { actions: [] }).worktree, undefined, 'none unless asked for');
   for (const [worktree, error] of [
     [[], 'worktree should be an object with setup and/or check.'],
     [true, 'worktree should be an object with setup and/or check.'],
     [{ setup: 3 }, 'worktree.setup should be a command.'],
     [{ check: '  ' }, 'worktree.check should be a command.'],
+    [{ teardown: 5 }, 'worktree.teardown should be a command.'],
     [{ keep: 'app/.build' }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
     [{ keep: [] }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
     [{ keep: ['/abs/.build'] }, 'worktree.keep should be a list of folders inside the repo, like "app/.build".'],
@@ -643,6 +645,31 @@ test("archiving a thread with work that isn't on main keeps the worktree and bra
   );
   assert.ok(fs.existsSync(w.path));
   assert.ok(h.runner.get(id).worktree, 'still shown');
+});
+
+test('archiving runs the teardown in the worktree before cleanup, landed or not', async () => {
+  const { root, main } = makeRepo(PATCH(`{ teardown: "test -e .git && echo tearing down $PWD >> ${'$'}{HOME_LOG}" }`));
+  const log = path.join(root, 'teardowns.log');
+  process.env.HOME_LOG = log;
+  try {
+    const h = harness();
+    const kept = await threadWithWorktree(h, main);
+    commit(kept.w.path, { 'runner/b.ts': '2\n' }, 'Not landed');
+    h.runner.update({ threadId: kept.id, archived: true });
+    await until(() => notes(h, kept.id).some((n) => n.includes(' stay: ')), 'the cleanup');
+    const run = h.events(kept.id).find((e) => e.type === 'action.run' && e.trigger === 'worktree.teardown');
+    assert.equal(run?.title, 'Tear down the worktree');
+    assert.equal(run?.ok, true);
+    assert.equal(run?.patch, 'checks');
+    assert.ok(fs.existsSync(kept.w.path), 'the unlanded worktree stays');
+
+    const landed = await threadWithWorktree(h, main);
+    h.runner.update({ threadId: landed.id, archived: true });
+    await until(() => notes(h, landed.id).some((n) => n.startsWith('Removed')), 'the cleanup');
+    assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), [`tearing down ${kept.w.path}`, `tearing down ${landed.w.path}`], 'ran inside each worktree while it was still there');
+  } finally {
+    delete process.env.HOME_LOG;
+  }
 });
 
 test('cleanUpWorktree keeps a worktree with uncommitted changes to tracked files', async () => {

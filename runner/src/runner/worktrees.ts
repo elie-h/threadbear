@@ -111,7 +111,7 @@ export const worktreesPart = {
   // setup runs by itself. So that copy, with the scripts it names as they
   // are in the worktree, must be a version Mike trusted (Daybreak, 5 Nov).
   // Threadbear's own worktrees count as its checkout, so stay trusted.
-  async worktreeSetup(this: Runner, copy: string, id: string): Promise<{ command?: string; run?: string } | { skip: string }> {
+  async worktreeSetup(this: Runner, copy: string, id: string, key: 'setup' | 'teardown' = 'setup'): Promise<{ command?: string; run?: string } | { skip: string }> {
     let verdict;
     try {
       verdict = await this.patchTrust.check(copy, fs.statSync(copy).mtimeMs);
@@ -131,7 +131,7 @@ export const worktreesPart = {
     // Refused as it loaded: a setup that isn't one hashed script, say.
     if (again && 'error' in again) return { skip: `its copy of the ${id} patch didn't load. ${again.error}` };
     // Trusted, but asking for no setup there: nothing to run.
-    return { command: again?.setup, run: again?.setupRun };
+    return key === 'setup' ? { command: again?.setup, run: again?.setupRun } : { command: again?.teardown, run: again?.teardownRun };
   },
 
   // A thread whose worktree was removed (it was archived with everything
@@ -187,6 +187,77 @@ export const worktreesPart = {
     return land ? [...set.actions, land] : set.actions;
   },
 
+  // Before cleanup, on every archive or delete whether or not the branch
+  // landed: what setup made outside the folder (a database, a deployment)
+  // would otherwise outlive the thread, and a branch merged by a squashed
+  // PR never counts as landed. From the worktree's own copy of the patch,
+  // trusted as setup's is.
+  async worktreeTeardown(this: Runner, st: ThreadState, deleted: boolean): Promise<void> {
+    const { rec } = st;
+    const w = rec.worktree;
+    if (!w || !isDirectory(w.path)) return;
+    const from = isInside(rec.cwd, w.path) && isDirectory(rec.cwd) ? rec.cwd : w.path;
+    const say = (text: string) => {
+      if (deleted) this.notice('info', `"${rec.title}": ${text}`);
+      else {
+        this.emit(st, { type: 'system.note', text });
+        this.markDirty(st);
+      }
+    };
+    let teardown: { command?: string; run?: string } = {};
+    let id = '';
+    for (const file of worktreePatchFiles(from, this.panelsRoot).filter((f) => isInside(f, w.path))) {
+      id = path.basename(file, path.extname(file));
+      const found = await this.worktreeSetup(file, id, 'teardown');
+      if ('skip' in found) {
+        // Only worth saying when the copy asks for one: most repos don't.
+        if (!fs.readFileSync(file, 'utf8').includes('teardown')) return;
+        this.log.warn("didn't run a worktree's teardown", { threadId: rec.id, patch: file, reason: found.skip });
+        say(`Didn't run the worktree's teardown: ${found.skip}`);
+        return;
+      }
+      if (found.command) {
+        teardown = found;
+        break;
+      }
+    }
+    if (!teardown.command) return;
+    if (teardown.run) {
+      const by = automaticTrust(teardown.run);
+      if (!by || !this.patchTrust.verify(by.file, by.hash)) {
+        say(`Didn't run the worktree's teardown (${teardown.command}): its patch or a script it runs changed since it was checked.`);
+        return;
+      }
+    }
+    const outcome = await runCommand(teardown.run ?? teardown.command, {
+      cwd: w.path,
+      env: { ...process.env, ...threadEnv(rec.id, this.cfg.home) },
+      shell: this.actionShell,
+      timeoutMs: this.actionTimeoutMs,
+      background: this.backgroundJobs,
+    });
+    this.log.info('worktree teardown', { threadId: rec.id, path: w.path, ok: outcome.ok });
+    if (deleted) {
+      if (!outcome.ok) this.notice('info', `"${rec.title}" was deleted, but its worktree's teardown (${teardown.command}) failed: ${outcome.text.split('\n').slice(-5).join('\n')}`);
+      return;
+    }
+    const body: EventBody = {
+      type: 'action.run',
+      actionId: `${id}.worktree-teardown`,
+      patch: id,
+      title: 'Tear down the worktree',
+      command: teardown.command,
+      ok: outcome.ok,
+      text: outcome.text,
+      truncated: outcome.truncated,
+      durationMs: outcome.durationMs,
+      trigger: 'worktree.teardown',
+    };
+    if (outcome.exitCode !== undefined) body.exitCode = outcome.exitCode;
+    this.emit(st, body);
+    this.markDirty(st);
+  },
+
   // When the thread is archived or deleted: its worktree and branch go if
   // everything on them is on main; otherwise they stay, and the thread (or,
   // once it's deleted, a notice) says so and how to land or drop them.
@@ -194,6 +265,7 @@ export const worktreesPart = {
     const { rec } = st;
     const w = rec.worktree;
     if (!w || w.removedAt) return;
+    await this.worktreeTeardown(st, deleted);
     let result;
     try {
       result = await cleanUpWorktree(w);
