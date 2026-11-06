@@ -496,6 +496,13 @@ export const patchesPart = {
       const event = this.emit(st, body, st.rt.turn?.turnId);
       st.rec.lastActivityAt = this.isoNow();
       this.markDirty(st);
+      // What a command did is often what its chips' `when` and badges ask
+      // (a Run that starts a server swaps for its Stop): read them now,
+      // rather than at the next poll up to LIVE_POLL_MS later.
+      if (st.rt.patches) {
+        st.rt.patches.at = -Infinity;
+        void this.refreshPatches(st);
+      }
       return { ok: outcome.ok, exitCode: outcome.exitCode, durationMs: outcome.durationMs, seq: event.seq };
     } finally {
       running.delete(actionId);
