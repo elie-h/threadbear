@@ -186,7 +186,7 @@ test('a new thread in an opted-in repo gets its own worktree, cwd, setup run, br
   assert.equal(rec?.worktreePending, undefined);
 });
 
-test('a new thread in a repo that lands as a PR is told so, and its chip says Open PR', async () => {
+test('a new thread in a repo that lands as a PR is told so, and gets no Land chip', async () => {
   const { main } = makeRepo(PATCH(`{ land: "pr" }`));
   const h = harness();
   const { thread } = h.runner.create({ text: 'Fix it', accountId: 'claude-3', cwd: main });
@@ -195,10 +195,8 @@ test('a new thread in a repo that lands as a PR is told so, and its chip says Op
   assert.match(brief, /run `tb land` in the worktree: it rebases the branch on origin's main, runs the repo's check, pushes the branch and opens or updates its pull request\./);
   assert.doesNotMatch(brief, /never pushes/);
   assert.equal(h.store.load(thread.id)?.worktree?.land, 'pr');
-  await until(() => Boolean(h.runner.get(thread.id).actions), 'the patches to load');
-  const chip = h.runner.get(thread.id).actions?.find((a) => a.id === 'worktree.land');
-  assert.equal(chip?.title, 'Open PR');
-  assert.match(chip?.note ?? '', /push it and open or update its pull request/);
+  await until(() => Boolean(h.runner.get(thread.id).patches), 'the patches to load');
+  assert.equal(h.runner.get(thread.id).actions?.find((a) => a.id === 'worktree.land'), undefined);
 });
 
 test('worktree: false, a folder with no patches, and a repo without main checked out all start where asked', async () => {

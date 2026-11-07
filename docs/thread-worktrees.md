@@ -142,9 +142,10 @@ main only ever follows origin's, and `tb land`:
    the branch has one open, which the push has just updated. Prints the
    PR's URL.
 
-`--dry-run` does steps 1 to 3 and says what it would push. The Land chip
-is "Open PR" for such a thread (threads made before the patch said so
-keep "Land"; `tb land` reads the patch either way). Once the PR is
+`--dry-run` does steps 1 to 3 and says what it would push. Such a thread
+has no Land chip (threads made before the patch said so keep it; `tb
+land` reads the patch either way): a patch running `gh` can offer chips
+that follow the PR. Once the PR is
 squash-merged, the branch's own commits no longer match main's, so a
 thread carrying on afterwards should start again from `origin/main`
 rather than land more on the same branch. Cleaning up still counts a

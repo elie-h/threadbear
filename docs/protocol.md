@@ -3768,7 +3768,7 @@ access none of this changes anything.
 |---|---|---|
 | `convex` | a folder with `convex/` and a `package.json` or `convex.json` beside it (a bare folder called `convex` isn't enough) | `convex.dashboard`, a `url` panel: `https://dashboard.convex.dev/d/<name>` for the `CONVEX_DEPLOYMENT` in `.env.local` (then `.env`), `http://127.0.0.1:6790` for an anonymous local deployment, the dashboard's front page with no deployment yet. A cloud deployment's panel also has `convex`, with the deployment's URL from the `.env.local` (then `.env`) line ending `CONVEX_URL` (`CONVEX_URL`, `VITE_CONVEX_URL`, ...). Only those lines of the file are read, and a file over 64 KB is skipped as if it weren't there |
 | `xcode` | a folder with an `.xcodeproj` or `.xcworkspace` | `xcode.simulator`, an `image` panel drawn by `panels.render` |
-| `worktree` | a thread with a worktree of its own (see Worktrees) | no panel: the action `worktree.land`, "Land" ("Open PR" with `land: "pr"`), which runs `tb land` |
+| `worktree` | a thread with a worktree of its own (see Worktrees) | no panel: the action `worktree.land`, "Land", which runs `tb land` (none with `land: "pr"`) |
 
 A client shows what it can: a `url` panel in a web view, an `image` panel
 by asking `panels.render` now and then while it's on screen, a `list`
@@ -3953,8 +3953,9 @@ land` instead fetches origin's main and rebases on `origin/main`,
 fast-forwarding the local main to it only when it's just behind, runs
 `check`, pushes the branch (`--force-with-lease`) and opens a PR with `gh
 pr create` unless it has one open, then prints the PR's URL. `--dry-run`
-stops before the push. The thread's `worktree.land` action is titled
-"Open PR" rather than "Land", and the agent's brief says it opens a PR.
+stops before the push. The thread has no `worktree.land` action, since
+what's worth pressing turns on the PR's state on GitHub (a patch running
+`gh` can offer that), and the agent's brief says it opens a PR.
 
 When the thread is archived or deleted, a worktree whose branch is on main
 (or has nothing of its own) is removed with its branch; otherwise both stay,
