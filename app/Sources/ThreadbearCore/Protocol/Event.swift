@@ -220,20 +220,24 @@ public struct Question: Sendable, Hashable, Decodable {
 
 public struct QuestionRequest: Sendable, Hashable, Decodable {
     public var approvalId: String
+    /// Absent for a background subagent's.
+    public var itemId: String?
     public var questions: [Question]
 
-    public init(approvalId: String, questions: [Question]) {
+    public init(approvalId: String, itemId: String? = nil, questions: [Question]) {
         self.approvalId = approvalId
+        self.itemId = itemId
         self.questions = questions
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         approvalId = (try? c.decodeIfPresent(String.self, forKey: .approvalId)) ?? ""
+        itemId = try? c.decodeIfPresent(String.self, forKey: .itemId)
         questions = c.lossyArray(Question.self, forKey: .questions)
     }
 
-    enum CodingKeys: String, CodingKey { case approvalId, questions }
+    enum CodingKeys: String, CodingKey { case approvalId, itemId, questions }
 }
 
 /// An agent's `ask_secret` (docs/protocol.md, "Secrets"): a card asking
@@ -494,8 +498,15 @@ public enum EventPayload: Sendable, Hashable {
     case questionRequested(QuestionRequest)
     case secretRequested(SecretRequest)
     case reviewUpdated(DesignReview)
+    /// A reply button made, pressed or failed (docs/protocol.md, "Reply
+    /// buttons"): the whole button each time.
+    case buttonUpdated(ReplyButton)
     case approvalResolved(ApprovalResolution)
     case planUpdated([PlanEntry])
+    /// "Plan first": the agent's plan, waiting for Mike, and what became of
+    /// it (`go` approved, `revise` sent back).
+    case planProposed(itemId: String, text: String)
+    case planResolved(itemId: String, go: Bool)
     /// `wokeBy`: what finished and started a turn the agent began by itself.
     case turnStarted(wokeBy: [BackgroundTask] = [])
     case turnCompleted(TurnCompletion)
@@ -583,6 +594,12 @@ public struct Event: Sendable, Hashable, Decodable {
         enum CodingKeys: String, CodingKey { case itemId, text, images, message, origin, answers, editOf, reviewId, reviewResponse, summary, narration, givesWay, final }
     }
 
+    private struct PlanCardFields: Decodable {
+        var itemId: String
+        var text: String?
+        var decision: String?
+    }
+
     private struct PlanFields: Decodable {
         var entries: [PlanEntry]
 
@@ -644,10 +661,19 @@ public struct Event: Sendable, Hashable, Decodable {
         case "review.updated":
             let c = try decoder.container(keyedBy: ReviewFields.self)
             return .reviewUpdated(try c.decode(DesignReview.self, forKey: .review))
+        case "button.updated":
+            let c = try decoder.container(keyedBy: ButtonFields.self)
+            return .buttonUpdated(try c.decode(ReplyButton.self, forKey: .button))
         case "approval.resolved":
             return .approvalResolved(try ApprovalResolution(from: decoder))
         case "plan.updated":
             return .planUpdated(try PlanFields(from: decoder).entries)
+        case "plan.proposed":
+            let fields = try PlanCardFields(from: decoder)
+            return .planProposed(itemId: fields.itemId, text: fields.text ?? "")
+        case "plan.resolved":
+            let fields = try PlanCardFields(from: decoder)
+            return .planResolved(itemId: fields.itemId, go: fields.decision == "go")
         case "turn.started":
             let c = try decoder.container(keyedBy: TurnStartedFields.self)
             return .turnStarted(wokeBy: (try? c.decodeIfPresent([BackgroundTask].self, forKey: .wokeBy)) ?? [])
@@ -680,6 +706,7 @@ public struct Event: Sendable, Hashable, Decodable {
     }
 
     private enum ReviewFields: String, CodingKey { case review }
+    private enum ButtonFields: String, CodingKey { case button }
     private enum TurnStartedFields: String, CodingKey { case wokeBy }
 }
 
@@ -752,11 +779,16 @@ extension KeyedDecodingContainer {
         ((try? decodeIfPresent(LossyArray<Element>.self, forKey: key)) ?? nil)?.elements ?? []
     }
 
-    /// An integer sent as a whole number or a numeric string.
+    /// An integer sent as a whole number or a numeric string, within what
+    /// JavaScript counts exactly (±2^53), as every number here comes from
+    /// the runner or Convex. Past that it's nil: a seq of Int.max from
+    /// another runner made `seq + 1` trap, as `Int(1e100)` would have.
     func lenientInt(forKey key: Key) -> Int? {
-        if let value = try? decodeIfPresent(Int.self, forKey: key) { return value }
-        if let value = try? decodeIfPresent(Double.self, forKey: key), value.isFinite { return Int(value) }
-        if let text = try? decodeIfPresent(String.self, forKey: key) { return Int(text) }
+        let most = 9_007_199_254_740_991
+        func held(_ value: Int?) -> Int? { value.flatMap { (-most...most).contains($0) ? $0 : nil } }
+        if let value = try? decodeIfPresent(Int.self, forKey: key) { return held(value) }
+        if let value = try? decodeIfPresent(Double.self, forKey: key) { return held(Int(checked: value)) }
+        if let text = try? decodeIfPresent(String.self, forKey: key) { return held(Int(text)) }
         return nil
     }
 }

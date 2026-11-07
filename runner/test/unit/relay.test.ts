@@ -432,3 +432,38 @@ test("a card from an older runner keeps its seqs: the body's diffs make way", ()
   assert.equal(new Set(ev.map((e) => e.seq)).size, ev.length);
   assert.match(String((ev.find((e) => e.seq === 14 * SCALE + 6) as { text?: string }).text), /Also changed: a\.ts/);
 });
+
+test("an agent's archive goes to that runner with by: agent", async () => {
+  const h = harness();
+  h.subscribed.add(T);
+  const done = h.relay.call(T, 'threads.update', { threadId: T, archived: true, archivedBy: 'agent' });
+  await new Promise((r) => setImmediate(r));
+  for (const s of h.subs.get('relay:commandState') ?? []) s.onUpdate({ state: 'done' });
+  await done;
+  const q = h.calls.find((c) => c.fn === 'relay:queueCommand')!;
+  assert.deepEqual(q.args.args, { archive: true, by: 'agent' });
+});
+
+// Daybreak, 7 Nov 2026 ("Remote Plan first threads silently start with full
+// access"): Relay.create forwarded only ask, full and auto, so a Plan first
+// thread started on another Mac went with no mode and got full access.
+test('a new thread there keeps every mode; Plan first goes as Ask plus a flag, and an unknown mode is refused', async () => {
+  const sent = async (permissionMode: unknown) => {
+    const h = harness();
+    const made = h.relay.create('bruce', { text: 'Start', permissionMode });
+    await new Promise((r) => setImmediate(r));
+    h.subs.get('relay:commandState')![0]!.onUpdate({ state: 'done', threadId: 'new1' });
+    await made;
+    return h.calls.filter((c) => c.fn === 'relay:queueCommand').at(-1)!.args.args as Record<string, unknown>;
+  };
+  for (const mode of ['full', 'ask', 'auto'] as const) assert.deepEqual(await sent(mode), { text: 'Start', permissionMode: mode });
+  const plan = await sent('plan');
+  assert.deepEqual(plan, { text: 'Start', permissionMode: 'ask', plan: true });
+  // What a runner from before Plan first reads of it: Ask, never the full-access default.
+  const oldReceiver = (a: Record<string, unknown>) => (a.permissionMode === 'ask' || a.permissionMode === 'full' || a.permissionMode === 'auto' ? a.permissionMode : 'full');
+  assert.equal(oldReceiver(plan), 'ask');
+  assert.deepEqual(await sent(undefined), { text: 'Start' });
+  const h = harness();
+  await assert.rejects(h.relay.create('bruce', { text: 'Start', permissionMode: 'yolo' }), /permissionMode must be one of/);
+  assert.equal(h.calls.filter((c) => c.fn === 'relay:queueCommand').length, 0, 'nothing queued');
+});

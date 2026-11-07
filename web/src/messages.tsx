@@ -14,6 +14,7 @@ import { useLiveQuery } from './live';
 import type { FunctionReturnType } from 'convex/server';
 import { api } from '../../convex/_generated/api';
 import { useState, type ReactNode } from 'react';
+import { bareLinks, draftFrom, fenceClosed, draftHTML, draftLabel, draftLines, draftPlainText, type Draft, type Span } from './draft';
 
 // A message or tool line, from phone:messages or share:view.
 export type PageMessage = TurnMessage;
@@ -189,6 +190,7 @@ export function MessageText({
   threadPath,
   pictureChips,
   pasted,
+  button,
 }: {
   text: string;
   pictures?: Map<string, string>;
@@ -198,7 +200,12 @@ export function MessageText({
   pictureChips?: boolean;
   // This message's pasted pictures that went up, by number (picture-chips.ts).
   pasted?: Map<number, string>;
+  // Draws a [title](button:<id>) link as its button. Left out (a shared
+  // page, whose readers mustn't press Mike's buttons), it's the title as text.
+  button?: (id: string, title: ReactNode) => ReactNode;
 }) {
+  // The exact text Markdown reads, so a block's position can be looked up in it.
+  const markdown = escapeDestinations(text);
   return (
     <div className="md" id={seq === undefined ? undefined : stepId(seq)}>
       <Markdown
@@ -210,6 +217,17 @@ export function MessageText({
         // `a` below reads them and makes its own.
         urlTransform={(url, key) => ((key === 'src' && url.startsWith('file://')) || (key === 'href' && (readLink(url) || pictureNumber(url) !== undefined)) ? url : defaultUrlTransform(url))}
         components={{
+          // A ```slack, ```email or ```draft fence is a draft to send
+          // elsewhere (draft.ts); any other <pre> is drawn as before.
+          // Only a closed one: while a reply streams, an unclosed fence
+          // runs to the end of the text and stays code until it's done.
+          pre: ({ node, children, ...p }) => {
+            const fence = fenceOf(node);
+            const at = node?.position;
+            const closed = at?.start.offset !== undefined && at.end.offset !== undefined && fenceClosed(markdown, at.start.offset, at.end.offset);
+            const draft = fence && closed && draftFrom(fence.language, fence.code);
+            return draft ? <DraftBox draft={draft} /> : <pre {...p}>{children}</pre>;
+          },
           a: ({ node: _, href, children, ...p }) => {
             const picture = href ? pictureNumber(href) : undefined;
             if (picture !== undefined) {
@@ -229,6 +247,13 @@ export function MessageText({
               );
             }
             const link = href ? readLink(href) : undefined;
+            // A relative link (`[plan](shorts-plan/candidates.md)`) is a
+            // file in the thread's folder on the Mac; as an address here
+            // it's a page on this site that isn't there.
+            // `/` and `//` ones are this site's own pages and web addresses.
+            if (!link && href && !/^[#/]/.test(href) && !/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+              return <span title="This file is on the Mac">{children}</span>;
+            }
             if (!link) {
               return (
                 <a {...p} href={href} target="_blank" rel="noreferrer">
@@ -252,6 +277,7 @@ export function MessageText({
                 );
               }
             }
+            if (link.kind === 'button') return button ? button(link.id, children) : <>{children}</>;
             if (link.kind === 'thread' && threadPath) {
               const path = threadPath(link.id);
               return (
@@ -281,10 +307,85 @@ export function MessageText({
           },
         }}
       >
-        {escapeDestinations(text)}
+        {markdown}
       </Markdown>
     </div>
   );
+}
+
+// The language and text of a <pre> that's a fenced code block, read from
+// the HTML tree react-markdown hands over (`<pre><code
+// class="language-slack">`), or undefined for any other <pre>.
+type HastNode = { type?: string; tagName?: string; value?: string; properties?: { className?: unknown }; children?: HastNode[] };
+function fenceOf(node: unknown): { language?: string; code: string } | undefined {
+  const kids = (node as HastNode | undefined)?.children?.filter((k) => !(k.type === 'text' && !k.value?.trim()));
+  const code = kids?.length === 1 && kids[0]!.tagName === 'code' ? kids[0]! : undefined;
+  if (!code) return undefined;
+  const classes = Array.isArray(code.properties?.className) ? (code.properties.className as unknown[]) : [];
+  const language = classes.map(String).find((c) => c.startsWith('language-'))?.slice('language-'.length);
+  const text = (n: HastNode): string => (n.type === 'text' ? (n.value ?? '') : (n.children ?? []).map(text).join(''));
+  return { language, code: text(code) };
+}
+
+// A draft for Mike to send elsewhere: every line where the agent put it,
+// with a Slack one's formatting drawn, and a Copy that keeps the links.
+function DraftBox({ draft }: { draft: Draft }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    const plain = draftPlainText(draft);
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/plain': new Blob([plain], { type: 'text/plain' }),
+          'text/html': new Blob([draftHTML(draft)], { type: 'text/html' }),
+        }),
+      ]);
+    } catch {
+      // No ClipboardItem (an older browser) or no rich clipboard: the text alone.
+      await navigator.clipboard.writeText(plain);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="draft">
+      <div className="draft-head">
+        <span>{draftLabel(draft.kind)}</span>
+        <button className={copied ? 'btn plain copied' : 'btn plain'} onClick={() => void copy()} title="Copy the draft, with its links and formatting">
+          {copied ? '✓ Copied' : 'Copy'}
+        </button>
+      </div>
+      <div className="draft-body">
+        {draftLines(draft).map((line, i) => (
+          <div key={i} className={line.quote ? 'draft-quote' : undefined}>
+            {line.spans.some((s) => s.text) ? (
+              // An email or plain draft's bare addresses are links here, as on the Mac.
+              (draft.kind === 'slack' ? line.spans : line.spans.flatMap((s) => bareLinks(s.text))).map((s, j) => <DraftSpan key={j} span={s} />)
+            ) : (
+              <br />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DraftSpan({ span }: { span: Span }) {
+  let out: ReactNode = span.text;
+  if (span.code) out = <code>{out}</code>;
+  if (span.strike) out = <s>{out}</s>;
+  if (span.italic) out = <em>{out}</em>;
+  if (span.bold) out = <strong>{out}</strong>;
+  // draft.ts only makes http(s) and mailto links.
+  if (span.link) {
+    out = (
+      <a href={span.link} target="_blank" rel="noreferrer">
+        {out}
+      </a>
+    );
+  }
+  return <>{out}</>;
 }
 
 // Pictures that go after a row: an attachment, or what a tool handed back.

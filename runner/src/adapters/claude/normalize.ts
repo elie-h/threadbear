@@ -8,6 +8,7 @@ import type { AdapterOutput, AgentWrite, SubagentUpdate, TurnResult } from '../t
 import type { NormalizerContext } from '../context.ts';
 import { EDIT_TOOLS, PlanTracker, computeEditDiff, toolKind, toolTitle, truncateInput } from '../../tools.ts';
 import { diffLines } from '../../diff.ts';
+import { safeEnd } from '../../safe-cut.ts';
 
 // The file helpers moved to ../context.ts so the Codex normaliser shares
 // them; re-exported for the callers and tests that import them from here.
@@ -152,7 +153,7 @@ export class ClaudeNormalizer {
       // and the note says why.
       const text = typeof msg.summary === 'string' && msg.summary.trim() ? oneLineNote(msg.summary) : 'A background task finished.';
       if (this.turn === 'none') this.pendingNote = this.pendingNote ? `${this.pendingNote}\n${text}` : text;
-      else out.push({ kind: 'event', event: { type: 'system.note', text } });
+      else out.push({ kind: 'event', event: { type: 'system.note', text, wake: true } });
     } else if (msg.subtype === 'background_tasks_changed' && Array.isArray(msg.tasks)) {
       const tasks = (msg.tasks as AnyMsg[])
         .filter((t) => !t.ambient && typeof t.task_id === 'string')
@@ -608,7 +609,8 @@ function truncateText(text: string, itemId: string, ctx: NormalizerContext): { t
   } catch {
     blobPath = undefined;
   }
-  const cut = cutUtf8(text, LIMITS.toolResultText);
+  const bytesCut = cutUtf8(text, LIMITS.toolResultText);
+  const cut = bytesCut.slice(0, safeEnd(text, bytesCut.length));
   return blobPath ? { text: cut, truncated: true, blobPath } : { text: cut, truncated: true };
 }
 
@@ -631,15 +633,19 @@ export function cutUtf8(text: string, max: number): string {
 // the file by the time the runner looks (a command run straight after may
 // have changed it). Undefined when it can't be rebuilt (no originalFile,
 // text that has moved): then nothing is trusted, and a patch waits for
-// Mike as one written any other way does.
+// Mike as one written any other way does. `base`: an edit's originalFile's
+// hash, as the rest of the file is that and not the agent's (F21); null
+// for a Write, or an edit of a file that was missing or empty.
 export function wroteFromResult(name: string, input: Record<string, unknown>, tur: AnyMsg | undefined): AgentWrite | undefined {
   const file = (typeof tur?.filePath === 'string' && tur.filePath) || (typeof input.file_path === 'string' ? input.file_path : '');
   if (!file) return undefined;
   let after: string | null = null;
+  let base: string | null = null;
   if (name === 'Write') {
     after = typeof tur?.content === 'string' ? tur.content : typeof input.content === 'string' ? input.content : null;
   } else {
     let text: string | null = typeof tur?.originalFile === 'string' ? tur.originalFile : tur?.originalFile === null ? '' : null;
+    if (text) base = sha256Of(text);
     const edits =
       name === 'MultiEdit'
         ? Array.isArray(input.edits)
@@ -654,7 +660,11 @@ export function wroteFromResult(name: string, input: Record<string, unknown>, tu
     after = text;
   }
   if (after === null) return undefined;
-  return { path: file, sha256: crypto.createHash('sha256').update(Buffer.from(after, 'utf8')).digest('hex') };
+  return { path: file, sha256: sha256Of(after), base };
+}
+
+function sha256Of(text: string): string {
+  return crypto.createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
 }
 
 // One edit as Claude Code's Edit applies it: an empty old_string makes a

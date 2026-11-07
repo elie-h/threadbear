@@ -233,4 +233,43 @@
 //    phone:requestPicture, phone:heldPicture and a `picture` command: one tool
 //    picture uploaded for a day when it's tapped. An older runner fails a picture
 //    command as unknown, and an older phone never asks for any of it.
-export const API_VERSION = 52;
+// 53: sync:sharedUsage goes by who wrote each reading. A runner key gets only
+//    the owner key's readings, of the logins the owner has listed for its
+//    runner (runnerLogins, sync:setRunnerLogins and sync:runnerLogins, owner
+//    key only), with no runnerId, marked `byOwnerKey`; nobody gets a runner
+//    key's readings, the owner included. A runner key's account readings are
+//    stored read no later than now. sync:pools gives a runner key no member
+//    named by another runner's id. An older runner takes the rows it's given
+//    as before.
+// 54: a runner key's archived threads stay in threadIndex (within its cap,
+//    archived rows giving way first), so the main Mac's Archived list has
+//    other machines' archived threads and can open and unarchive them
+//    (docs/protocol.md, "Other runners' threads"). A runner sends the
+//    archived rows an older backend dropped once, on first hearing 54.
+// 55: an owned schedule can carry `checkTimeoutSecs`, how long its check may
+//    take (60 s without). An older runner sends none.
+// 56: runners have an order Mike sets on the phone (runnerOrder,
+//    phone:setRunnerOrder). phone:runners lists them in it, and a new thread
+//    or quick ask that names no runner goes to the first one online in it
+//    before falling back to the main Mac as before. An older phone gets the
+//    list in that order and still sends no runner.
+// 57: phone:waiting, a thread's sends its runner hasn't applied yet, and
+//    phone:cancel, which takes back one still pending. An older phone
+//    never asks for either.
+// 58: sync:runnerOrder and sync:setRunnerOrder, the main Mac's key only:
+//    the same runner order the phone sets (API 56), for the Mac's Settings >
+//    Runners. An older runner sends the Mac no order, and its Settings list
+//    the runners as before.
+// 59: reply buttons (docs/protocol.md, "Reply buttons"). A message row can
+//    carry `buttons`, the state of the buttons its text links ([title](button:<id>)),
+//    which the runner sends again when one is pressed (appendMessages patches
+//    just them); phone:messages returns them, and phone:press queues a `press`
+//    command with { buttonId }. An older runner sends none and fails a press
+//    as unknown; an older phone shows the link as text.
+// 60: sync:sharedThreads, the ids of a runner's rows shared by link, which a
+//    runner checks against its own threads on every start and every hour,
+//    removing ones it deleted and rewriting ones it stopped sharing. And a
+//    runner key can't save a schedule under an id gone from another runner
+//    within the day (scheduleGone). An older runner never asks, and does
+//    as before.
+export const API_VERSION = 60;

@@ -25,6 +25,7 @@ import {
   type AppServerTimings,
   type OversizedLine,
 } from './appserver.ts';
+import { runsAsCodeByName } from '../../code-writes.ts';
 import { CodexApprovals } from './approvals.ts';
 import { CodexTools, dynamicToolSpecs, toolGuidance, type ToolDefinition } from './tools.ts';
 import { CodexNormalizer, limitsFromAccount } from './normalize.ts';
@@ -83,6 +84,9 @@ export type CodexAdapterDeps = {
   normalizer?: NormalizerFactory;
   // A runner.notice warning (configWarning: a broken config.toml).
   onNotice?: (text: string) => void;
+  // More developer instructions for a new thread with tools, read at its
+  // start (an experiment's line, RICH_BLOCKS_LINE).
+  extraGuidance?: () => string;
   timings?: Partial<CodexTimings>;
   maxLineBytes?: number;
   now?: () => number;
@@ -105,6 +109,8 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   start(opts: StartSessionOptions, sink: SessionSink): AgentSession {
+    // Codex never runs in the sandbox (sandbox.ts), so a thread shut in one can't run here.
+    if (opts.confined) throw new Error("This thread runs in a sandbox, and Codex can't, so it wasn't started. Move it to a Claude login.");
     const s = new CodexSession(opts, sink, this.deps, {
       track: (p, live) => this.track(p, live),
       child: (parent, child) => {
@@ -314,7 +320,9 @@ export function codexSkillCommands(r: SkillsListResponse | undefined): SlashComm
     if (seen.has(s.name!)) continue;
     seen.add(s.name!);
     const description = s.shortDescription || s.description;
-    out.push({ name: s.name!, source: 'skill', ...(description ? { description } : {}) });
+    // Codex's "repo" is the folder's, as Claude's "project".
+    const scope = s.scope === 'repo' ? 'project' : s.scope;
+    out.push({ name: s.name!, source: 'skill', ...(description ? { description } : {}), ...(scope ? { scope } : {}), path: s.path! });
   }
   return out;
 }
@@ -410,6 +418,11 @@ export class CodexSession implements AgentSession {
   private mode: PermissionMode;
   private cwd: string;
   private sentCwd: string;
+  // The model Codex said it runs, and whether the thread is in Codex's plan
+  // mode: it keeps a collaboration mode for the turns after, so leaving
+  // "Plan first" has to send default once.
+  private liveModel?: string;
+  private inPlan = false;
 
   constructor(opts: StartSessionOptions, sink: SessionSink, deps: CodexAdapterDeps, hooks: SessionHooks) {
     this.opts = opts;
@@ -462,6 +475,7 @@ export class CodexSession implements AgentSession {
       note: (text) => this.sink.output({ kind: 'event', event: { type: 'system.note', text } }),
       cwd: () => this.cwd,
       itemPaths: (id) => this.itemPaths.get(id),
+      runsAsCode: (file) => runsAsCodeByName(file) || (opts.runsAsCode?.(file) ?? false),
       callTool: (params, o) => this.tools.call(params, o),
       now: this.now,
     });
@@ -517,7 +531,7 @@ export class CodexSession implements AgentSession {
       const tools = dynamicToolSpecs(defs);
       // With tools, the guidance on using them leads the developer
       // instructions (the namespace description is too short to hold it).
-      const developer = [tools.length ? toolGuidance(defs) : '', opts.instructions ?? ''].filter(Boolean).join('\n\n');
+      const developer = [tools.length ? toolGuidance(defs) : '', tools.length ? (this.deps.extraGuidance?.() ?? '') : '', opts.instructions ?? ''].filter(Boolean).join('\n\n');
       const config = { ...common.config, ...(developer ? { developer_instructions: developer } : {}) };
       const params: ThreadStartParams = { ...common, config, ...(tools.length ? { dynamicTools: tools } : {}) };
       res = await this.proc.request<ThreadStartResponse>('thread/start', params);
@@ -528,6 +542,8 @@ export class CodexSession implements AgentSession {
     this.threadId = thread.id;
     this.sentCwd = opts.cwd;
     this.normalizer.setThread?.(thread.id, typeof res.model === 'string' ? res.model : undefined);
+    if (typeof res.model === 'string') this.liveModel = res.model;
+    this.inPlan = res.collaborationMode?.mode === 'plan';
     this.sink.output({ kind: 'session', nativeSessionId: thread.id, ...(typeof res.model === 'string' ? { model: res.model } : {}) });
     if (this.proc.version) this.sink.output({ kind: 'cliVersion', version: this.proc.version });
     if (isEffortLevel(res.reasoningEffort)) this.sink.output({ kind: 'effort', level: res.reasoningEffort });
@@ -725,13 +741,15 @@ export class CodexSession implements AgentSession {
   // (for the approval card's title).
   private trackItem(method: string, p: Record<string, unknown>): void {
     if (method !== 'item/started' && method !== 'item/completed') return;
-    const item = p.item as { type?: string; id?: string; changes?: { path?: unknown }[] } | undefined;
+    const item = p.item as { type?: string; id?: string; changes?: { path?: unknown; kind?: { move_path?: unknown } }[] } | undefined;
     if (!item || typeof item.id !== 'string') return;
     if (item.type === 'commandExecution') {
       if (method === 'item/started') this.turn?.openCommands.add(item.id);
       else this.turn?.openCommands.delete(item.id);
     } else if (item.type === 'fileChange' && method === 'item/started' && Array.isArray(item.changes)) {
-      this.itemPaths.set(item.id, item.changes.map((c) => c?.path).filter((x): x is string => typeof x === 'string'));
+      // A rename's new name too: a file moved to .threadbear/patches is
+      // written there (code-writes.ts).
+      this.itemPaths.set(item.id, item.changes.flatMap((c) => [c?.path, c?.kind?.move_path]).filter((x): x is string => typeof x === 'string' && x !== ''));
       if (this.itemPaths.size > 200) this.itemPaths.delete(this.itemPaths.keys().next().value!);
     }
   }
@@ -833,6 +851,14 @@ export class CodexSession implements AgentSession {
     if (model) params.model = model;
     const effort = this.effort ?? (this.effortChanged ? this.ownEffort(model) : undefined);
     if (effort) params.effort = effort;
+    // "Plan first" is Codex's plan collaboration mode (with the read-only
+    // sandbox turnPolicy gives it); its settings need a model by name.
+    const plan = this.mode === 'plan';
+    const collabModel = model ?? this.liveModel ?? this.opts.account.defaultModel;
+    if ((plan || this.inPlan) && collabModel) {
+      params.collaborationMode = { mode: plan ? 'plan' : 'default', settings: { model: collabModel, reasoning_effort: effort ?? null, developer_instructions: null } };
+      this.inPlan = plan;
+    }
     return params;
   }
 

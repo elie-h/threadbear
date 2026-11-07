@@ -275,6 +275,54 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(host.draggingEntered(outside), [])
     }
 
+    /// A thread dragged out of the sidebar and let go over the open thread
+    /// goes into its message as the thread's chip, as pasting its id does
+    /// (Mike, 6 Nov). The drag starts in this app, unlike a file's.
+    @MainActor func testAThreadDroppedOnTheTranscriptGoesInAsItsChip() throws {
+        let id = "th_drag_\(UUID().uuidString.prefix(6))"
+        AppModel.shared.threads[id] = ThreadSummary(id: id, title: "Fix the sidebar", accountId: "claude-main")
+        defer { AppModel.shared.threads[id] = nil }
+        let board = NSPasteboard(name: NSPasteboard.Name("thread-drop-test-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        board.clearContents()
+        board.setString(id, forType: .string)
+
+        let (window, parent, composer) = composerInWindow()
+        defer { window.close() }
+        composer.string = "Look at "
+        composer.setSelectedRange(NSRange(location: 8, length: 0))
+        let handle = ComposerHandle()
+        handle.textView = composer
+        let controller = TranscriptController()
+        controller.composerHandle = handle
+        let host = TranscriptHost(controller: controller, ghost: false)
+        host.frame = parent.bounds
+        parent.addSubview(host)
+        XCTAssertTrue(host.registeredDraggedTypes.contains(.string))
+
+        let drag = FakeDrag(pasteboard: board, window: window, location: .zero, source: ThreadDrag.Source(ended: {}))
+        XCTAssertEqual(host.draggingEntered(drag), .copy)
+        XCTAssertTrue(host.performDragOperation(drag))
+        XCTAssertEqual(composer.draftNow.text, "Look at [Fix the sidebar](thread:\(id))")
+        XCTAssertTrue(window.firstResponder === composer)
+
+        // An id of a thread this Mac doesn't know is only words.
+        board.clearContents()
+        board.setString("th_nobody", forType: .string)
+        XCTAssertEqual(host.draggingEntered(drag), [])
+    }
+
+    /// Nothing in a transcript row signs up for drags, or a file let go over
+    /// it would stop there and never reach the transcript. A row's icon (an
+    /// NSImageView) did.
+    @MainActor func testTranscriptRowsLeaveDropsToTheTranscript() {
+        XCTAssertTrue(Symbols.makeView().registeredDraggedTypes.isEmpty, "a row's icon")
+        XCTAssertTrue(BackgroundRowCell(frame: .zero).bear.registeredDraggedTypes.isEmpty, "the background-work bear")
+        let text = TranscriptTextView()
+        text.isEditable = false
+        XCTAssertTrue(text.registeredDraggedTypes.isEmpty, "a row's words")
+    }
+
     /// A picture dropped from a temp folder goes to the runner as a copy, as
     /// a screenshot thumbnail's file is deleted as the drop ends (issue #2).
     func testAPictureFromATempFolderIsKept() throws {
@@ -771,7 +819,7 @@ final class AutomationTests: XCTestCase {
                 AppDump.Section(name: "Running", threads: []),
             ], snoozed: 0, archived: 2),
             selection: AppDump.Thread(id: "th1", title: "Fix it", status: "idle", needsYou: false, unread: false, hovered: false),
-            composer: AppDump.Composer(draft: "th1", text: "hello", images: 0, cwd: "/w", account: "claude-3", model: "default (the runner's, claude-haiku-5-5)", ask: true),
+            composer: AppDump.Composer(draft: "th1", text: "hello", images: 0, cwd: "/w", account: "claude-3", model: "default (the runner's, claude-haiku-5-5)", ask: true, mode: .ask),
             transcript: AppDump.Transcript(threadId: "th1", state: "loaded", hasMoreAbove: false, atBottom: true, rows: [
                 AppDump.Row(id: "u:1", kind: "user", height: 64, expanded: nil, inGroup: false, onScreen: false, seq: 1, turn: "t1", text: "Fix it"),
                 AppDump.Row(id: "g:r:r1", kind: "group", height: 32, expanded: true, inGroup: false, onScreen: true, seq: 2, turn: "t1", text: "Ran a command"),

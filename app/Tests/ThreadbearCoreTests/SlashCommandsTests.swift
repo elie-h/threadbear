@@ -54,4 +54,63 @@ final class SlashCommandsTests: XCTestCase {
         XCTAssertEqual(list.commands[1].argumentHint, "<f>")
         XCTAssertEqual(SlashPalette.Category.cli.title(provider: "codex"), "Codex")
     }
+
+    func testOriginSaysWhereItCameFrom() {
+        func origin(_ c: SlashCommand) -> String { SlashPalette.origin(of: c, provider: "claude") }
+        XCTAssertEqual(origin(SlashCommand(name: "v", source: "skill", scope: "user", path: "/u/.claude/skills/v/SKILL.md")), "Your skill")
+        XCTAssertEqual(origin(SlashCommand(name: "d", source: "skill", scope: "project", path: "/r/.claude/commands/d.md")), "This folder's command")
+        XCTAssertEqual(origin(SlashCommand(name: "p", source: "skill", scope: "plugin", plugin: "ship-tools")), "From the ship-tools plugin")
+        XCTAssertEqual(origin(SlashCommand(name: "x", source: "skill", scope: "claude.ai")), "Synced from claude.ai")
+        XCTAssertEqual(origin(SlashCommand(name: "c", source: "cli", scope: "system")), "Claude Code's own")
+        XCTAssertEqual(SlashPalette.shortPath("/Users/m/.claude/skills/v/SKILL.md", home: "/Users/m"), "~/.claude/skills/v/SKILL.md")
+        XCTAssertEqual(SlashPalette.shortPath("/opt/x", home: "/Users/m"), "/opt/x")
+    }
+
+    func testColumnsFitTheirLongestEntryAndGiveWayWhenNarrow() {
+        // Wide: each column as wide as it needs.
+        let wide = SlashPalette.columnWidths(total: 900, categories: 160, list: 230)
+        XCTAssertEqual(wide.categories, 160)
+        XCTAssertEqual(wide.list, 230)
+        // A very long name takes at most half of what's left.
+        XCTAssertEqual(SlashPalette.columnWidths(total: 900, categories: 160, list: 600).list, 370)
+        // Narrow: the list gives way first, then the categories.
+        let narrow = SlashPalette.columnWidths(total: 520, categories: 160, list: 230)
+        XCTAssertEqual(narrow.list, 160)
+        XCTAssertEqual(narrow.categories, 160)
+        let tiny = SlashPalette.columnWidths(total: 450, categories: 160, list: 230)
+        XCTAssertEqual(tiny.list, 120)
+        XCTAssertEqual(tiny.categories, 130)
+    }
+
+    func testHeightIsAboutHalfTheWindow() {
+        XCTAssertEqual(SlashPalette.height(window: 1000), 500)
+        XCTAssertEqual(SlashPalette.height(window: 400), 300, "never below the least")
+        XCTAssertEqual(SlashPalette.height(window: 1600), 560, "nor above the most")
+    }
+
+    func testDraggedSizesStayInBounds() {
+        typealias L = SlashPalette.Layout
+        XCTAssertEqual(L.height(100, window: 900), 220, "never too short to use")
+        XCTAssertEqual(L.height(2000, window: 900), 765, "never past 85% of the window")
+        XCTAssertEqual(L.height(500, window: 900), 500)
+        XCTAssertEqual(L.width(300, window: 1400), 480)
+        XCTAssertEqual(L.width(5000, window: 1400), 1320)
+        // A dragged column leaves the others room: 900 wide, the rest needing 500.
+        XCTAssertEqual(L.column(600, least: 110, others: 500, total: 900), 400)
+        XCTAssertEqual(L.column(50, least: 110, others: 500, total: 900), 110)
+        // A list Mike dragged wide isn't held to half of what's left.
+        XCTAssertEqual(SlashPalette.columnWidths(total: 900, categories: 160, list: 450, chosen: true).list, 450)
+        XCTAssertEqual(SlashPalette.columnWidths(total: 900, categories: 160, list: 450).list, 370)
+        let saved = try! JSONDecoder().decode(L.self, from: JSONEncoder().encode(L(height: 500, list: 300)))
+        XCTAssertEqual(saved, L(height: 500, list: 300))
+    }
+
+    func testDescriptionRendersInlineMarkdown() {
+        let text = SlashPalette.description("Run the `computercub` command, **now**.")
+        XCTAssertEqual(String(text.characters), "Run the computercub command, now.")
+        let code = text.runs.first { $0.inlinePresentationIntent == .code }
+        XCTAssertEqual(code.map { String(text[$0.range].characters) }, "computercub")
+        // Plain words and paths come through as they are.
+        XCTAssertEqual(String(SlashPalette.description("Open chrome:// pages (Finder, Xcode)").characters), "Open chrome:// pages (Finder, Xcode)")
+    }
 }
