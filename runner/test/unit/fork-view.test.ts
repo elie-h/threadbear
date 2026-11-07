@@ -8,8 +8,9 @@
 // something of Mike's comes out false. What's left must match SHOWN below.
 // Adding to SHOWN means every fork shows it: only things anyone can use
 // (public pages, the repo's own scripts), never Mike's accounts. Something
-// only Mike needs gets a `when` that checks for something only he has, as
-// app-store.ts's onMikesMac does.
+// only Mike needs gets a `when` that checks for something only he has.
+// This fork dropped Mike's app-store.ts (its Website chip included), so it
+// shows no actions of its own.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -22,7 +23,7 @@ import { applyLive, loadPatchSet, type CommandOutcome } from '../../src/patches.
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
 const SHOWN = {
-  actions: [['Website', 'https://threadbear.mikecann.app/']],
+  actions: [],
   panels: ['Worktrees'],
 };
 
